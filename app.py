@@ -5,7 +5,7 @@ import io
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from fpdf import FPDF
@@ -124,6 +124,16 @@ textarea { font-family: 'Inter', sans-serif !important; font-size: 0.9rem !impor
   filter: brightness(1.08); color: #0A0E1A !important;
 }
 .stButton > button[kind="primary"] p, [data-testid="stBaseButton-primary"] p, .stFormSubmitButton > button p { color: #0A0E1A !important; font-weight: 700 !important; }
+
+.stLinkButton a, [data-testid^="stBaseLinkButton"] {
+  border-radius: 10px !important; font-weight: 700 !important; padding: 0.55rem 1.1rem !important;
+}
+[data-testid="stBaseLinkButton-primary"], .stLinkButton a[kind="primary"] {
+  background: var(--grad) !important; border: none !important; color: #0A0E1A !important;
+  box-shadow: 0 8px 24px -10px rgba(124, 131, 255, 0.8);
+}
+[data-testid="stBaseLinkButton-primary"] p, .stLinkButton a[kind="primary"] p { color: #0A0E1A !important; font-weight: 700 !important; }
+[data-testid="stBaseLinkButton-primary"]:hover { filter: brightness(1.08); }
 
 /* ---------- Tabs ---------- */
 [data-testid="stTabs"] [role="tablist"], [data-baseweb="tab-list"] {
@@ -1436,29 +1446,472 @@ def infer_contact_name_and_role(
     return vert_cfg["fallback_greeting"], "Team / Branch Management"
 
 
-def build_email_pitch(lead: ScrapedLead, vertical_key: str) -> str:
-    config = VERTICAL_PRESETS.get(
-        vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
-    )
+# ------------------------------------------------------------------
+# SY Communications brand & sector copy (email + overview PDF)
+# ------------------------------------------------------------------
+
+SENDER_COMPANY = "SY Communications"
+SENDER_DEFAULTS = {
+    "name": "",
+    "title": "Business Solutions Consultant",
+    "phone": "01743 667419",
+    "email": "hello@sycomms.co.uk",
+    "website": "www.sycomms.co.uk",
+    "address": "Suite C, Jupiter House, Shrewsbury SY2 6LG",
+}
+BRAND_PURPLE = (31, 20, 80)       # #1f1450
+BRAND_PURPLE_2 = (45, 31, 110)    # #2d1f6e
+BRAND_TEAL = (0, 181, 163)        # #00b5a3
+SWITCHOVER_LINE = (
+    "With BT's analogue phone network switching off by January 2027, it's a good moment to"
+    " move to a system that actually works with your software."
+)
+
+# Per-sector copy. Keys match VERTICAL_PRESETS.
+SECTOR_COPY: Dict[str, Dict[str, Any]] = {
+    "Estate & Lettings Agents": {
+        "sector_plural": "estate and lettings agents",
+        "subject": "Stop missing applicant calls at {company}",
+        "pain": "Most agencies still ask who's calling, then search {crms} while the caller waits. And calls missed during viewings often go to the agent down the road.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which system you use and how many staff take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Calls missed during viewings", "Applicants who can't get through rarely leave a message; they ring the next agent."),
+            ("No caller context", "Staff answer blind, then search the CRM while the landlord or tenant waits."),
+            ("No record of what was agreed", "Call notes live in people's heads, not on the property or tenancy file."),
+        ],
+        "outcomes": [
+            ("Screen-pop on every call", "The landlord, vendor or applicant record opens the moment the phone rings."),
+            ("Click-to-dial from your CRM", "Call straight from the property, applicant or tenancy record. No retyping numbers."),
+            ("Calls logged automatically", "Every call, duration and recording saved against the right record for compliance and disputes."),
+            ("Missed-call recovery", "Missed calls are flagged instantly with the caller's record, so no lead goes cold."),
+        ],
+    },
+    "Dental Practices": {
+        "sector_plural": "dental practices",
+        "subject": "Fewer missed patient calls at {company}",
+        "pain": "Reception gets swamped at 8.30am, patients who can't get through don't always call back, and staff search {crms} on every call.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which system you use and how many handsets you have, and I'll send a no-obligation quote.",
+        "challenges": [
+            ("Morning call peaks", "Reception is overwhelmed at opening and patients give up or go elsewhere."),
+            ("Lost recalls and bookings", "Missed calls mean missed appointments and gaps in the diary."),
+            ("Searching while the patient waits", "Staff look up records manually on every call."),
+        ],
+        "outcomes": [
+            ("Patient screen-pop", "The patient's record appears on the reception screen as the phone rings."),
+            ("Call queueing & callbacks", "Smart queues and messages manage the morning rush without losing callers."),
+            ("Missed-call follow-up", "Every missed call is flagged so reception can ring back and protect recalls."),
+            ("Compliant call recording", "Recordings stored securely and linked to the patient record."),
+        ],
+    },
+    "Solicitors & Legal Practices": {
+        "sector_plural": "law firms",
+        "subject": "Calls logged straight to the matter at {company}",
+        "pain": "Fee earners are rarely at their desk, clients expect to reach the right person first time, and phone time often never reaches the matter in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which system you run and roughly how many users, and I'll send an indicative quote.",
+        "challenges": [
+            ("Fee earners away from the desk", "Calls bounce around the office or go to voicemail."),
+            ("Unrecorded billable time", "Phone time isn't captured against the matter, so it's never billed."),
+            ("Multiple offices, multiple systems", "Branches that can't transfer calls between each other easily."),
+        ],
+        "outcomes": [
+            ("Dial from the matter", "Click-to-call from the client or matter record in your case management system."),
+            ("Softphone anywhere", "Fee earners take calls on laptop or mobile securely, on the firm's number."),
+            ("Duration & recordings on file", "Call time and recordings logged against the matter for billing and compliance."),
+            ("One system, every office", "Reception, fee earners and branches on one platform with simple transfers."),
+        ],
+    },
+    "Accountants & Auditors": {
+        "sector_plural": "accountancy practices",
+        "subject": "Client calls logged automatically at {company}",
+        "pain": "Around deadlines the phones don't stop, clients expect you to know who they are, and call time rarely gets captured in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with your team size and practice software, and I'll send an indicative quote.",
+        "challenges": [
+            ("Deadline call surges", "January and year-end bring call spikes the team can't keep up with."),
+            ("Unbilled advice time", "Quick calls add up but rarely make it onto a timesheet."),
+            ("Hybrid teams", "Staff split between home and office struggle to transfer calls smoothly."),
+        ],
+        "outcomes": [
+            ("Client identified on arrival", "The client's details pop up before you say hello."),
+            ("Automatic call logging", "Calls logged against the client record, with duration for time tracking."),
+            ("Desk to laptop in one tap", "Seamless transfers between desk phones and softphones for hybrid staff."),
+            ("Lower fixed costs", "Line rental and call costs consolidated onto one cloud platform."),
+        ],
+    },
+    "General Medical Clinics": {
+        "sector_plural": "clinics",
+        "subject": "Shorter phone queues for patients at {company}",
+        "pain": "Peak-hour queues put pressure on the front desk, and staff often have to search {crms} before they can help.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many lines or handsets you run, and I'll send a no-obligation overview.",
+        "challenges": [
+            ("Peak-hour queues", "The phones spike at opening and patients abandon the call."),
+            ("Triage without context", "Staff answer without the patient's details in front of them."),
+            ("Sensitive conversations", "Calls need to be recorded and stored securely."),
+        ],
+        "outcomes": [
+            ("Patient screen-pop", "The patient's record appears as the call arrives to speed up triage."),
+            ("Queueing & callbacks", "Patients hear their queue position or get a callback instead of an engaged tone."),
+            ("Secure call recording", "Encrypted recordings stored against the patient record."),
+            ("Easy internal transfers", "Direct routes between reception, clinicians and admin."),
+        ],
+    },
+}
+
+EVERYTHING_WE_DO = [
+    "Cloud phone systems & softphones",
+    "Desk, DECT & headset hardware",
+    "Business broadband & connectivity",
+    "Business mobiles",
+    "Networking & Wi-Fi",
+    "CCTV, security & access control",
+]
+
+
+def friendly_company_name(legal_name: str) -> str:
+    """'HART NEW HOMES (WALSALL) LIMITED' -> 'Hart New Homes (Walsall)'."""
+    name = re.sub(r"\b(LIMITED|LTD\.?|PLC|LLP|L\.L\.P\.)\s*$", "", legal_name.strip(), flags=re.I).strip(" ,.")
+    if name.isupper():
+        name = " ".join(
+            w if (w in {"&", "UK"} or (len(w) <= 3 and not any(c in "AEIOU" for c in w) and w.isalpha()))
+            else w.title()
+            for w in name.split()
+        )
+    return name.replace(" And ", " and ").replace(" Of ", " of ").replace(" The ", " the ")
+
+
+def get_sender() -> Dict[str, str]:
+    sender = dict(SENDER_DEFAULTS)
+    sender.update({k: v for k, v in st.session_state.get("sender_profile", {}).items() if v})
+    return sender
+
+
+def build_signature(sender: Dict[str, str]) -> str:
+    lines = ["Kind regards,"]
+    if sender.get("name"):
+        lines.append("")
+        lines.append(sender["name"])
+        if sender.get("title"):
+            lines.append(sender["title"])
+    lines.append(SENDER_COMPANY)
+    contact = " | ".join(x for x in (sender.get("phone"), sender.get("email")) if x)
+    if contact:
+        lines.append(contact)
+    if sender.get("website"):
+        lines.append(sender["website"])
+    return "\n".join(lines)
+
+
+def build_email_subject(lead: ScrapedLead, vertical_key: str) -> str:
+    copy = SECTOR_COPY.get(vertical_key, SECTOR_COPY["Estate & Lettings Agents"])
+    crms = VERTICAL_PRESETS.get(vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"])["crms"]
+    return copy["subject"].format(company=friendly_company_name(lead.company_name), crm1=crms[0])
+
+
+def build_email_pitch(
+    lead: ScrapedLead,
+    vertical_key: str,
+    include_attachment_line: bool = True,
+    include_switchover: bool = True,
+) -> str:
+    config = VERTICAL_PRESETS.get(vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"])
+    copy = SECTOR_COPY.get(vertical_key, SECTOR_COPY["Estate & Lettings Agents"])
+    sender = get_sender()
     first_name, _ = infer_contact_name_and_role(lead, vertical_key)
-    crms_str = " / ".join(config["crms"][:3])
+    greeting_name = first_name if first_name != config["fallback_greeting"] else "there"
+    company = friendly_company_name(lead.company_name)
+    crms = config["crms"]
+    crms_str = ", ".join(crms[:2]) + f" or {crms[2]}" if len(crms) >= 3 else " or ".join(crms)
 
-    bullets_text = "\n".join([f"- {b}" for b in config["pitch_bullets"]])
+    who = f"I'm {sender['name']} from {SENDER_COMPANY}" if sender.get("name") else f"I'm getting in touch from {SENDER_COMPANY}"
+    bullets = "\n".join(f"- {title}" for title, _ in copy["outcomes"][:4])
 
-    # Personalised opening matching the reference lead style
-    email_text = f"""Hi {first_name},
+    parts = [
+        f"Hi {greeting_name},",
+        f"{who}. We help {copy['sector_plural']} like {company} connect their phones to the software they already use.",
+        copy["pain"].format(crms=crms_str),
+        "We connect your phones to whichever system you use, so you get:",
+        bullets,
+    ]
+    if include_switchover:
+        parts.append(SWITCHOVER_LINE)
+    if include_attachment_line:
+        parts.append(
+            "I've attached a one-page overview of how it works."
+        )
+    parts.append(copy["cta"])
+    parts.append(build_signature(sender))
+    parts.append(
+        "P.S. If this isn't relevant, just reply \"no thanks\" and I won't get in touch again."
+    )
+    return "\n\n".join(parts)
 
-I hope you're well.
 
-We work with a number of firms across the sector connecting their telephony directly into their core systems ({crms_str}) so that:
+def build_mailto(to: str, subject: str, body: str) -> str:
+    """mailto: link that opens the user's default email app with everything filled in."""
+    body_crlf = body.replace("\r\n", "\n").replace("\n", "\r\n")
+    return (
+        f"mailto:{quote(to or '', safe='@.+-_')}"
+        f"?subject={quote(subject or '', safe='')}"
+        f"&body={quote(body_crlf, safe='')}"
+    )
 
-{bullets_text}
 
-Let me know which system {lead.company_name} uses and roughly how many handsets or users you have, and I'll send over a quote.
 
-Kind regards,
-Commercial Telephony Solutions"""
-    return email_text
+# ------------------------------------------------------------------
+# SY Communications sector overview (the "About us" email attachment)
+# ------------------------------------------------------------------
+
+
+def _box(pdf: FPDF, x: float, y: float, w: float, h: float, style: str = "F", radius: float = 2.5) -> None:
+    try:
+        pdf.rect(x, y, w, h, style=style, round_corners=True, corner_radius=radius)
+    except TypeError:  # Older fpdf2 without rounded corners
+        pdf.rect(x, y, w, h, style=style)
+
+
+def create_sector_overview_pdf(lead: Optional[ScrapedLead], vertical_key: str) -> bytes:
+    """One-page, branded SY Communications solutions overview, personalised to the prospect."""
+    copy = SECTOR_COPY.get(vertical_key, SECTOR_COPY["Estate & Lettings Agents"])
+    cfg = VERTICAL_PRESETS.get(vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"])
+    sender = get_sender()
+    T = sanitize_pdf_text
+    purple, purple2, teal = BRAND_PURPLE, BRAND_PURPLE_2, BRAND_TEAL
+    ink, grey, light = (30, 30, 46), (95, 100, 120), (244, 243, 250)
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=False)
+    pdf.set_margins(14, 14, 14)
+    pdf.add_page()
+    W = 210
+    L, R = 14, 196
+    CW = R - L
+
+    # ---------- Header band ----------
+    pdf.set_fill_color(*purple)
+    pdf.rect(0, 0, W, 50, "F")
+    pdf.set_fill_color(*purple2)
+    pdf.rect(0, 46, W, 4, "F")
+    pdf.set_fill_color(*teal)
+    pdf.rect(0, 50, W, 1.2, "F")
+    # Logo mark: teal circle with 'SY'
+    pdf.set_fill_color(*teal)
+    pdf.ellipse(L, 13, 14, 14, "F")
+    pdf.set_text_color(255, 255, 255)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.set_xy(L, 17.5)
+    pdf.cell(14, 5, "SY", align="C")
+    pdf.set_xy(L + 18, 13)
+    pdf.set_font("Helvetica", "B", 17)
+    pdf.cell(100, 8, "SY Communications")
+    pdf.set_xy(L + 18, 21)
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(190, 184, 230)
+    pdf.cell(100, 5, "Business telecoms, connectivity & security")
+    pdf.set_xy(L, 31)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(255, 255, 255)
+    pdf.multi_cell(108, 6, T(f"Phone systems built for {copy['sector_plural']}"), align="L")
+    # Prepared-for panel
+    if lead:
+        pdf.set_fill_color(*purple2)
+        _box(pdf, 128, 11, 68, 26)
+        pdf.set_xy(132, 14)
+        pdf.set_font("Helvetica", "B", 6.5)
+        pdf.set_text_color(*teal)
+        pdf.cell(60, 4, "PREPARED FOR")
+        pdf.set_xy(132, 19)
+        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_text_color(255, 255, 255)
+        pdf.multi_cell(61, 4.6, T(friendly_company_name(lead.company_name)[:60]), align="L")
+        pdf.set_xy(132, 30.5)
+        pdf.set_font("Helvetica", "", 7.5)
+        pdf.set_text_color(190, 184, 230)
+        pdf.cell(60, 4, T(pd.Timestamp.now().strftime("%B %Y")))
+
+    # ---------- Intro ----------
+    crms = cfg["crms"]
+    y = 58
+    pdf.set_xy(L, y)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(*ink)
+    pdf.multi_cell(
+        CW, 5.2,
+        T(
+            f"We connect your phone system directly to {', '.join(crms[:-1])} and {crms[-1]}, so every call"
+            " arrives with context, gets logged automatically and never slips through the cracks."
+        ),
+        align="L",
+    )
+
+    def heading(text: str, yy: float) -> float:
+        pdf.set_xy(L, yy)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_text_color(*teal)
+        pdf.cell(CW, 4, text.upper())
+        pdf.set_draw_color(*teal)
+        pdf.set_line_width(0.5)
+        pdf.line(L, yy + 5.2, L + 10, yy + 5.2)
+        return yy + 8
+
+    # ---------- The challenge (3 cards) ----------
+    y = heading("The challenge", pdf.get_y() + 4)
+    gap = 4
+    cw3 = (CW - 2 * gap) / 3
+    for i, (title, desc) in enumerate(copy["challenges"][:3]):
+        x = L + i * (cw3 + gap)
+        pdf.set_fill_color(*light)
+        _box(pdf, x, y, cw3, 24)
+        pdf.set_xy(x + 4, y + 3.5)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(*purple)
+        pdf.multi_cell(cw3 - 8, 4.4, T(title), align="L")
+        pdf.set_xy(x + 4, pdf.get_y() + 1)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*grey)
+        pdf.multi_cell(cw3 - 8, 3.9, T(desc), align="L")
+    y += 24 + 5
+
+    # ---------- How we solve it ----------
+    y = heading("How we solve it", y)
+    pdf.set_xy(L, y)
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(*grey)
+    pdf.cell(22, 6, "Integrates with:")
+    x = L + 23
+    pdf.set_font("Helvetica", "B", 8)
+    for crm in crms:
+        w = pdf.get_string_width(T(crm)) + 7
+        pdf.set_draw_color(*teal)
+        pdf.set_line_width(0.35)
+        pdf.set_text_color(*purple)
+        _box(pdf, x, y + 0.5, w, 5.2, style="D", radius=2.6)
+        pdf.set_xy(x, y + 0.5)
+        pdf.cell(w, 5.2, T(crm), align="C")
+        x += w + 2.5
+    y += 10
+    cw2 = (CW - gap) / 2
+    for i, (title, desc) in enumerate(copy["outcomes"][:4]):
+        col, row = i % 2, i // 2
+        x = L + col * (cw2 + gap)
+        yy = y + row * 17
+        pdf.set_fill_color(*teal)
+        pdf.ellipse(x, yy + 0.5, 7, 7, "F")
+        pdf.set_xy(x, yy + 1.8)
+        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(7, 4.4, str(i + 1), align="C")
+        pdf.set_xy(x + 10, yy)
+        pdf.set_font("Helvetica", "B", 9.5)
+        pdf.set_text_color(*ink)
+        pdf.cell(cw2 - 10, 5, T(title))
+        pdf.set_xy(x + 10, yy + 5.5)
+        pdf.set_font("Helvetica", "", 8.2)
+        pdf.set_text_color(*grey)
+        pdf.multi_cell(cw2 - 12, 4, T(desc), align="L")
+    y += 2 * 17 + 1
+
+    # ---------- Switchover callout ----------
+    pdf.set_fill_color(230, 247, 245)
+    _box(pdf, L, y, CW, 19)
+    pdf.set_fill_color(*teal)
+    pdf.rect(L, y, 1.6, 19, "F")
+    pdf.set_xy(L + 6, y + 3)
+    pdf.set_font("Helvetica", "B", 9.5)
+    pdf.set_text_color(*purple)
+    pdf.cell(CW - 10, 5, "The analogue switch-off is coming: January 2027")
+    pdf.set_xy(L + 6, y + 8.5)
+    pdf.set_font("Helvetica", "", 8.2)
+    pdf.set_text_color(*grey)
+    pdf.multi_cell(
+        CW - 12, 4,
+        "BT is retiring the traditional phone network. If you still rely on analogue or ISDN lines, moving now"
+        " means you choose the timing, and you upgrade to a system that works with your software.",
+        align="L",
+    )
+    y += 19 + 5
+
+    # ---------- One partner + Why us (two columns) ----------
+    y0 = y
+    heading("One partner for your technology", y)
+    yy = y + 8
+    for i, item in enumerate(EVERYTHING_WE_DO):
+        pdf.set_fill_color(*teal)
+        pdf.ellipse(L, yy + i * 6 + 1.6, 2, 2, "F")
+        pdf.set_xy(L + 4, yy + i * 6)
+        pdf.set_font("Helvetica", "", 8.3)
+        pdf.set_text_color(*ink)
+        pdf.cell(80, 5, T(item))
+
+    xw = L + CW / 2 + 4
+    pdf.set_xy(xw, y0)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_text_color(*teal)
+    pdf.cell(80, 4, "WHY SY COMMUNICATIONS")
+    pdf.set_draw_color(*teal)
+    pdf.line(xw, y0 + 5.2, xw + 10, y0 + 5.2)
+    why = [
+        ("Local to you", "A Shrewsbury-based team you can actually speak to."),
+        ("One point of contact", "From first survey through installation and aftercare."),
+        ("Built around your software", "We set up the integration around how your team works."),
+        ("Clear, no-obligation quotes", "Straightforward pricing before you commit to anything."),
+    ]
+    yy = y0 + 8
+    for title, desc in why:
+        pdf.set_xy(xw, yy)
+        pdf.set_font("Helvetica", "B", 8.3)
+        pdf.set_text_color(*ink)
+        pdf.cell(80, 4.2, T(title))
+        pdf.set_xy(xw, yy + 4.2)
+        pdf.set_font("Helvetica", "", 7.8)
+        pdf.set_text_color(*grey)
+        pdf.cell(80, 4, T(desc))
+        yy += 9
+    y = max(yy, y0 + 8 + 6 * 6) + 3
+
+    # ---------- Next steps ----------
+    if y > 250:  # Safety: never collide with the footer
+        y = 250
+    y = heading("Next steps", y)
+    steps = [
+        ("15-minute call", "A quick chat about your team, lines and software."),
+        ("Free review", "We look at your current setup and contracts."),
+        ("Tailored quote", "A clear, no-obligation proposal."),
+    ]
+    for i, (title, desc) in enumerate(steps):
+        x = L + i * (cw3 + gap)
+        pdf.set_fill_color(*light)
+        _box(pdf, x, y, cw3, 16)
+        pdf.set_xy(x + 4, y + 3)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(*purple)
+        pdf.cell(cw3 - 8, 4.5, T(f"{i + 1}. {title}"))
+        pdf.set_xy(x + 4, y + 8.3)
+        pdf.set_font("Helvetica", "", 7.6)
+        pdf.set_text_color(*grey)
+        pdf.multi_cell(cw3 - 8, 3.6, T(desc), align="L")
+
+    # ---------- Footer band ----------
+    pdf.set_fill_color(*purple)
+    pdf.rect(0, 272, W, 25, "F")
+    pdf.set_fill_color(*teal)
+    pdf.rect(0, 272, W, 1.2, "F")
+    pdf.set_xy(L, 277)
+    pdf.set_font("Helvetica", "B", 10.5)
+    pdf.set_text_color(255, 255, 255)
+    contact_name = sender.get("name") or "Talk to our team"
+    pdf.cell(90, 5, T(contact_name + (f"  |  {sender['title']}" if sender.get("name") and sender.get("title") else "")))
+    pdf.set_xy(L, 283)
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(190, 184, 230)
+    pdf.cell(
+        CW, 5,
+        T("  |  ".join(x for x in (sender.get("phone"), sender.get("email"), sender.get("website")) if x)),
+    )
+    pdf.set_xy(L, 288.5)
+    pdf.set_font("Helvetica", "", 7.2)
+    pdf.cell(CW, 4, T(sender.get("address", "")))
+
+    out = pdf.output()
+    return bytes(out) if not isinstance(out, str) else out.encode("latin-1", errors="replace")
 
 
 class LeadDossierPDF(FPDF):
@@ -1472,7 +1925,7 @@ class LeadDossierPDF(FPDF):
         self.cell(
             0,
             8,
-            "BUSINESS CONNECTIVITY | CONFIDENTIAL LEAD RECORD",
+            "SY COMMUNICATIONS | CONFIDENTIAL LEAD RECORD",
             ln=0,
         )
         self.ln(14)
@@ -1690,6 +2143,24 @@ with st.sidebar:
     )
     render_html('<div class="pe-side-h">This session</div>')
     sidebar_stats_slot = st.empty()
+    render_html('<div class="pe-side-h">Your email signature</div>')
+    with st.expander("Signature details", expanded=not st.session_state.get("sender_profile", {}).get("name")):
+        def _secret(key: str, default: str) -> str:
+            try:
+                return str(st.secrets.get(key, default))
+            except Exception:
+                return default
+        prof = st.session_state.setdefault("sender_profile", {
+            "name": _secret("SENDER_NAME", ""),
+            "title": _secret("SENDER_TITLE", SENDER_DEFAULTS["title"]),
+            "phone": _secret("SENDER_PHONE", SENDER_DEFAULTS["phone"]),
+            "email": _secret("SENDER_EMAIL", SENDER_DEFAULTS["email"]),
+        })
+        prof["name"] = st.text_input("Your name", value=prof.get("name", ""), placeholder="e.g. Sam")
+        prof["title"] = st.text_input("Job title", value=prof.get("title", ""))
+        prof["phone"] = st.text_input("Direct phone", value=prof.get("phone", ""))
+        prof["email"] = st.text_input("Your email", value=prof.get("email", ""))
+        st.session_state["sender_profile"] = prof
     render_html('<div class="pe-side-h">Account</div>')
     if st.button("Log out", **FULL_WIDTH):
         st.session_state["password_correct"] = False
@@ -1831,7 +2302,7 @@ with col_left:
                             manual_website=website_override,
                         )
                         st.session_state["current_lead"] = enriched_lead
-                        st.session_state.pop("custom_pitch_text", None)
+                        st.session_state.pop("draft_sig", None)
                         st.session_state["stat_dossiers"] += 1
 
 
@@ -1950,45 +2421,74 @@ with col_right:
                             st.markdown("**Pages checked:** " + " · ".join(lead.pages_checked))
 
             with tab2:
-                if "custom_pitch_text" not in st.session_state:
-                    st.session_state["custom_pitch_text"] = build_email_pitch(
-                        lead, current_vert_name
-                    )
-                to_line = primary_email or "no email found"
-                render_html(
-                    f'<div class="pe-chips" style="margin-bottom:10px">{chip("To: " + to_line, "accent")}'
-                    f'{chip("Greeting: " + contact_name)}</div>'
-                )
-                edited_pitch = st.text_area(
-                    "Email body",
-                    value=st.session_state["custom_pitch_text"],
-                    height=360,
-                )
-                st.session_state["custom_pitch_text"] = edited_pitch
+                o1, o2 = st.columns(2)
+                with o1:
+                    attach_overview = st.toggle("Attach sector overview", value=True, key="opt_attach",
+                                                help="Adds a line to the email and gives you the branded PDF to attach.")
+                with o2:
+                    include_switch = st.toggle("Mention Jan 2027 switch-off", value=True, key="opt_switch")
 
-                pdf_bytes = create_pdf_dossier(
-                    lead=lead,
-                    vertical_name=current_vert_name,
-                    pitch_text=edited_pitch,
-                    target_crms=vert_cfg["crms"],
-                )
-                clean_filename = (
-                    f"dossier_{re.sub(r'[^a-zA-Z0-9]', '_', lead.company_name).lower()}.pdf"
-                )
-                d_col1, d_col2 = st.columns(2)
-                with d_col1:
+                # Rebuild the draft when the lead, options or signature change (not on every keystroke)
+                sender_now = get_sender()
+                draft_sig = (lead.company_number, current_vert_name, attach_overview, include_switch,
+                             tuple(sorted(sender_now.items())))
+                if st.session_state.get("draft_sig") != draft_sig:
+                    st.session_state["email_to"] = primary_email or ""
+                    st.session_state["email_subject"] = build_email_subject(lead, current_vert_name)
+                    st.session_state["email_body"] = build_email_pitch(
+                        lead, current_vert_name,
+                        include_attachment_line=attach_overview,
+                        include_switchover=include_switch,
+                    )
+                    st.session_state["draft_sig"] = draft_sig
+
+                email_to = st.text_input("To", key="email_to", placeholder="name@firm.co.uk")
+                email_subject = st.text_input("Subject", key="email_subject")
+                edited_pitch = st.text_area("Email body", key="email_body", height=380)
+                if lead.emails_found and len(lead.emails_found) > 1:
+                    st.caption("Other addresses found: " + ", ".join(e for e in lead.emails_found if e != email_to))
+
+                mailto_url = build_mailto(email_to, email_subject, edited_pitch)
+                friendly = re.sub(r"[^A-Za-z0-9]+", "_", friendly_company_name(lead.company_name)).strip("_")
+                sector_slug = re.sub(r"[^A-Za-z0-9]+", "_", SECTOR_COPY.get(current_vert_name, {}).get("sector_plural", "sector")).strip("_")
+
+                st.link_button("✉️  Open in my email app", mailto_url, type="primary", **FULL_WIDTH)
+                b2, b3 = st.columns(2)
+                with b2:
+                    if attach_overview:
+                        st.download_button(
+                            label="⬇ Overview PDF",
+                            data=create_sector_overview_pdf(lead, current_vert_name),
+                            file_name=f"SY_Communications_{sector_slug}_overview_{friendly}.pdf",
+                            mime="application/pdf",
+                            **FULL_WIDTH,
+                        )
+                with b3:
                     st.download_button(
-                        label="Download PDF dossier",
-                        data=bytes(pdf_bytes),
-                        file_name=clean_filename,
+                        label="⬇ Lead dossier",
+                        data=bytes(create_pdf_dossier(
+                            lead=lead,
+                            vertical_name=current_vert_name,
+                            pitch_text=edited_pitch,
+                            target_crms=vert_cfg["crms"],
+                        )),
+                        file_name=f"dossier_{friendly.lower()}.pdf",
                         mime="application/pdf",
-                        type="primary",
                         **FULL_WIDTH,
                     )
-                with d_col2:
-                    copy_open = st.toggle("Show copy-ready email", value=False)
-                if copy_open:
-                    st.caption("Use the copy icon at the top-right of the box, then paste into Outlook.")
+                tips = []
+                if attach_overview:
+                    tips.append("Email links can't carry attachments: download the overview first, then drag it into the email.")
+                if len(mailto_url) > 1900:
+                    tips.append("This email is long, so some email apps may cut it short. If so, use the copy box below.")
+                if not email_to:
+                    tips.append("No email address found. Add one in the To box before opening your email app.")
+                for tip in tips:
+                    st.caption("💡 " + tip)
+
+                if st.toggle("Show copy-ready email", value=False, key="opt_copy"):
+                    st.caption("Use the copy icon at the top-right of each box.")
+                    st.code(email_subject, language=None)
                     st.code(edited_pitch, language=None)
 
 
