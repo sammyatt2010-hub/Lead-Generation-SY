@@ -79,7 +79,7 @@ VERTICAL_PRESETS = {
             ),
             "Click to dial directly from your CRM / property management portal",
             (
-                "Never miss an applicant lead — missed calls instantly flagged"
+                "Never miss an applicant lead - missed calls instantly flagged"
                 " for callback"
             ),
         ],
@@ -543,6 +543,33 @@ class LeadEnricher:
 # ==========================================
 
 
+def sanitize_pdf_text(text: str) -> str:
+    """Replaces Unicode bullets, smart quotes, and dashes with Latin-1 equivalents for FPDF."""
+    if not text:
+        return ""
+    replacements = {
+        "\u2022": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2026": "...",
+        "\u00a0": " ",
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "—": "-",
+        "–": "-",
+        "•": "-",
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 def build_email_pitch(lead: ScrapedLead, vertical_key: str) -> str:
     config = VERTICAL_PRESETS.get(
         vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
@@ -554,7 +581,7 @@ def build_email_pitch(lead: ScrapedLead, vertical_key: str) -> str:
     )
     crms_str = " / ".join(config["crms"][:3])
 
-    bullets_text = "\n".join([f"• {b}" for b in config["pitch_bullets"]])
+    bullets_text = "\n".join([f"- {b}" for b in config["pitch_bullets"]])
 
     email_text = f"""Hi {recipient_name},
 
@@ -600,24 +627,29 @@ def create_pdf_dossier(
     pdf.add_page()
 
     # Section 1: Firm & Registration Details
-    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_font("Helvetica", "B", 15)
     pdf.set_text_color(17, 24, 39)
-    pdf.cell(0, 8, lead.company_name[:45], ln=True)
+    pdf.cell(0, 8, sanitize_pdf_text(lead.company_name[:50]), ln=True)
 
     pdf.set_font("Helvetica", "", 10)
     pdf.set_text_color(75, 85, 99)
     meta_line = f"Vertical: {vertical_name}  |  Company #{lead.company_number or 'N/A'}  |  SIC: {', '.join(lead.sic_codes) or 'Active'}"
-    pdf.cell(0, 6, meta_line, ln=True)
+    pdf.cell(0, 6, sanitize_pdf_text(meta_line), ln=True)
 
     if lead.registered_address:
         pdf.cell(
             0,
             6,
-            f"Registered Office: {lead.registered_address[:80]}",
+            sanitize_pdf_text(f"Registered Office: {lead.registered_address[:80]}"),
             ln=True,
         )
     if lead.website_url:
-        pdf.cell(0, 6, f"Website: {lead.website_url}", ln=True)
+        pdf.cell(
+            0,
+            6,
+            sanitize_pdf_text(f"Website: {lead.website_url[:80]}"),
+            ln=True,
+        )
 
     pdf.ln(4)
     pdf.set_draw_color(229, 231, 235)
@@ -636,7 +668,9 @@ def create_pdf_dossier(
             pdf.cell(
                 0,
                 5,
-                f"- {off.name} ({off.role}) - Appointed: {off.appointed_on or 'N/A'}",
+                sanitize_pdf_text(
+                    f"- {off.name} ({off.role}) - Appointed: {off.appointed_on or 'N/A'}"
+                ),
                 ln=True,
             )
     else:
@@ -645,8 +679,8 @@ def create_pdf_dossier(
     pdf.ln(2)
     emails_str = ", ".join(lead.emails_found) if lead.emails_found else "None"
     phones_str = ", ".join(lead.phones_found) if lead.phones_found else "None"
-    pdf.cell(0, 5, f"Discovered Email(s): {emails_str}", ln=True)
-    pdf.cell(0, 5, f"Discovered Phone(s): {phones_str}", ln=True)
+    pdf.cell(0, 5, sanitize_pdf_text(f"Discovered Email(s): {emails_str}"), ln=True)
+    pdf.cell(0, 5, sanitize_pdf_text(f"Discovered Phone(s): {phones_str}"), ln=True)
 
     pdf.ln(4)
     pdf.line(10, pdf.get_y(), 200, pdf.get_y())
@@ -658,7 +692,10 @@ def create_pdf_dossier(
 
     pdf.set_font("Helvetica", "", 9)
     pdf.cell(
-        0, 5, f"Typical Sector CRMs/PMS: {', '.join(target_crms)}", ln=True
+        0,
+        5,
+        sanitize_pdf_text(f"Typical Sector CRMs/PMS: {', '.join(target_crms)}"),
+        ln=True,
     )
     pdf.ln(4)
 
@@ -671,10 +708,16 @@ def create_pdf_dossier(
     pdf.set_font("Courier", "", 8.5)
     pdf.set_text_color(15, 23, 42)
 
-    # Output draft in styled text block
-    pdf.multi_cell(190, 4.5, pitch_text, border=1, fill=True)
+    clean_pitch = sanitize_pdf_text(pitch_text)
+    pdf.multi_cell(190, 4.5, clean_pitch, border=1, fill=True)
 
-    return pdf.output()
+    # Universal bytes extraction across fpdf / fpdf2
+    output = pdf.output()
+    if isinstance(output, str):
+        return output.encode("latin-1", errors="replace")
+    elif isinstance(output, bytearray):
+        return bytes(output)
+    return output
 
 
 # ==========================================
@@ -813,7 +856,6 @@ with col_left:
                     manual_website=website_override,
                 )
                 st.session_state["current_lead"] = enriched_lead
-                # Reset any custom pitch edits for new lead
                 st.session_state.pop("custom_pitch_text", None)
 
 with col_right:
@@ -896,7 +938,6 @@ with col_right:
             )
             st.session_state["custom_pitch_text"] = edited_pitch
 
-            # Generate PDF in memory
             pdf_bytes = create_pdf_dossier(
                 lead=lead,
                 vertical_name=current_vert_name,
