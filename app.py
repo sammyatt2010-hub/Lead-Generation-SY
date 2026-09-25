@@ -2,9 +2,14 @@ import base64
 import hmac
 import html as html_lib
 import io
+import json
+import os
+import zipfile
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import formatdate
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
@@ -84,7 +89,8 @@ p, li, label, .stMarkdown { color: var(--text); }
 div[data-testid="stVerticalBlockBorderWrapper"] {
   border-radius: var(--radius) !important;
 }
-.st-key-card-left, .st-key-card-select, .st-key-card-right, .st-key-card-login {
+.st-key-card-queue { margin-top: 18px; }
+.st-key-card-left, .st-key-card-select, .st-key-card-right, .st-key-card-login, .st-key-card-queue {
   background: linear-gradient(180deg, rgba(22, 31, 51, 0.85) 0%, rgba(17, 24, 39, 0.85) 100%);
   border: 1px solid var(--border) !important;
   border-radius: var(--radius);
@@ -2104,13 +2110,198 @@ def create_pdf_dossier(
 
 
 # ==========================================
+# 3b. SENT LOG (remembers who's been emailed, across sessions)
+# ==========================================
+
+
+def _secret_value(key: str, default: str = "") -> str:
+    try:
+        return str(st.secrets.get(key, default) or default)
+    except Exception:
+        return default
+
+
+class SentLog:
+    """Stores {company_number: record} of firms that have been emailed.
+
+    Permanent: a JSON file in a private GitHub repo (set GITHUB_TOKEN + GITHUB_REPO in Secrets).
+    Fallback: a local file, which Streamlit Cloud wipes whenever the app restarts or redeploys.
+    """
+
+    def __init__(self) -> None:
+        self.token = _secret_value("GITHUB_TOKEN")
+        self.repo = _secret_value("GITHUB_REPO")  # e.g. "sammyatt2010-hub/prospect-engine-data"
+        self.branch = _secret_value("GITHUB_BRANCH", "main")
+        self.path = _secret_value("GITHUB_LOG_PATH", "sent_log.json")
+        self.backend = "github" if (self.token and self.repo) else "local"
+        try:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            base_dir = os.getcwd()
+        self.local_path = os.path.join(base_dir, ".sent_log.json")
+        self.last_error: Optional[str] = None
+
+    # ---------- GitHub backend ----------
+    def _url(self) -> str:
+        return f"https://api.github.com/repos/{self.repo}/contents/{self.path}"
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+
+    def _gh_read(self) -> Tuple[Dict[str, Any], Optional[str]]:
+        resp = requests.get(self._url(), headers=self._headers(), params={"ref": self.branch}, timeout=10)
+        if resp.status_code == 404:
+            return {}, None  # File doesn't exist yet; first write creates it
+        if resp.status_code != 200:
+            raise RuntimeError(self._describe(resp.status_code))
+        payload = resp.json()
+        content = base64.b64decode(payload.get("content", "") or b"").decode("utf-8") or "{}"
+        return json.loads(content), payload.get("sha")
+
+    def _gh_write(self, data: Dict[str, Any], sha: Optional[str], message: str) -> int:
+        body: Dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(json.dumps(data, indent=2, sort_keys=True).encode("utf-8")).decode("ascii"),
+            "branch": self.branch,
+        }
+        if sha:
+            body["sha"] = sha
+        resp = requests.put(self._url(), headers=self._headers(), json=body, timeout=12)
+        return resp.status_code
+
+    @staticmethod
+    def _describe(code: int) -> str:
+        return {
+            401: "GitHub rejected the token (401). Check GITHUB_TOKEN in Secrets.",
+            403: "GitHub token lacks permission (403). It needs Contents: Read and write on the repo.",
+            404: "GitHub repo not found (404). Check GITHUB_REPO in Secrets.",
+        }.get(code, f"GitHub returned an error ({code}).")
+
+    # ---------- Local backend ----------
+    def _local_read(self) -> Dict[str, Any]:
+        try:
+            with open(self.local_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _local_write(self, data: Dict[str, Any]) -> None:
+        tmp = self.local_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+        os.replace(tmp, self.local_path)
+
+    # ---------- Public API ----------
+    def load(self) -> Dict[str, Any]:
+        self.last_error = None
+        try:
+            return self._gh_read()[0] if self.backend == "github" else self._local_read()
+        except Exception as exc:  # Never let the log break the app
+            self.last_error = str(exc) if isinstance(exc, RuntimeError) else f"Couldn't load sent log ({exc.__class__.__name__})."
+            return {}
+
+    def apply(self, changes: Dict[str, Optional[Dict[str, Any]]], message: str) -> Dict[str, Any]:
+        """Applies {company_number: record or None (= un-mark)} and returns the latest full log.
+        Re-reads before writing, so two people using the app at once don't overwrite each other."""
+        self.last_error = None
+
+        def merge(data: Dict[str, Any]) -> Dict[str, Any]:
+            for key, record in changes.items():
+                if record is None:
+                    data.pop(key, None)
+                else:
+                    data[key] = record
+            return data
+
+        if self.backend == "local":
+            data = merge(self._local_read())
+            self._local_write(data)
+            return data
+
+        for _attempt in range(3):
+            data, sha = self._gh_read()
+            data = merge(data)
+            status = self._gh_write(data, sha, message)
+            if status in (200, 201):
+                return data
+            if status not in (409, 422):  # 409/422 = someone else saved first; re-read and retry
+                raise RuntimeError(self._describe(status))
+        raise RuntimeError("GitHub was busy saving the sent log. Please try again.")
+
+
+def now_uk() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("Europe/London"))
+    except Exception:
+        return datetime.now()
+
+
+def sent_label(record: Optional[Dict[str, Any]]) -> str:
+    """'✓ 25 Sep' for the tables."""
+    if not record:
+        return ""
+    try:
+        return "✓ " + datetime.fromisoformat(record.get("sent_at", "")).strftime("%d %b").lstrip("0")
+    except ValueError:
+        return "✓ Sent"
+
+
+# ------------------------------------------------------------------
+# Batch export: a zip of ready-to-send Outlook drafts
+# ------------------------------------------------------------------
+
+
+def draft_filename_part(company_name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", friendly_company_name(company_name)).strip("_") or "firm"
+
+
+def build_drafts_zip(items: List[Dict[str, Any]], attach_overview: bool) -> Tuple[bytes, int, List[str]]:
+    """items: queue items with lead/vertical/to/subject/body. Returns (zip_bytes, drafts_written, skipped_names)."""
+    buf = io.BytesIO()
+    written, skipped = 0, []
+    summary = io.StringIO()
+    summary.write("Firm,Company number,To,Contact,Subject,Website,Website match\n")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in items:
+            lead: ScrapedLead = item["lead"]
+            if not item.get("to"):
+                skipped.append(friendly_company_name(lead.company_name))
+                continue
+            written += 1
+            part = draft_filename_part(lead.company_name)
+            attachments = None
+            if attach_overview:
+                sector_slug = re.sub(
+                    r"[^A-Za-z0-9]+", "_",
+                    SECTOR_COPY.get(item["vertical"], {}).get("sector_plural", "sector"),
+                ).strip("_")
+                attachments = [(
+                    f"SY_Communications_{sector_slug}_overview_{part}.pdf",
+                    create_sector_overview_pdf(lead, item["vertical"]),
+                )]
+            eml = build_eml_draft(item["to"], item["subject"], item["body"], attachments=attachments)
+            zf.writestr(f"{written:02d}_{part}.eml", eml)
+            contact, _ = infer_contact_name_and_role(lead, item["vertical"])
+            row = [lead.company_name, lead.company_number or "", item["to"], contact,
+                   item["subject"], lead.website_url or "", lead.website_confidence or "Not found"]
+            summary.write(",".join('"' + str(v).replace('"', '""') + '"' for v in row) + "\n")
+        zf.writestr("_summary.csv", summary.getvalue())
+    return buf.getvalue(), written, skipped
+
+
+# ==========================================
 # 4. STREAMLIT APPLICATION
 # ==========================================
 
 def render_leads_table(df: pd.DataFrame, key: str):
     """Selectable company table with tidy columns. Works on old and new Streamlit versions."""
     column_config = {
-        "Company Name": st.column_config.TextColumn("Company Name", width=205),
+        "Company Name": st.column_config.TextColumn("Company Name", width=200),
+        "Contacted": st.column_config.TextColumn("Contacted", width=78, help="Already emailed (from the sent log)"),
         "Company Number": st.column_config.TextColumn("Co. #", width=74),
         "Incorporated": st.column_config.DateColumn("Since", format="MMM YYYY", width=78),
         "Town": st.column_config.TextColumn("Town", width=95),
@@ -2123,7 +2314,7 @@ def render_leads_table(df: pd.DataFrame, key: str):
     table_height = min(38 + 35 * len(df), 420)  # Grows with rows, scrolls after ~11
     common = dict(
         hide_index=True,
-        selection_mode="single-row",
+        selection_mode="multi-row",
         on_select="rerun",
         column_config=column_config,
         column_order=column_order,
@@ -2147,6 +2338,89 @@ for _k, _v in {"stat_searches": 0, "stat_firms": 0, "stat_dossiers": 0}.items():
     st.session_state.setdefault(_k, 0)
 
 hero_slot = st.empty()  # Filled at the end so the progress stepper reflects this run's actions
+MAX_BATCH = 25
+SENT_LOG = SentLog()
+for _k, _v in {"opt_attach": True, "opt_switch": True, "queue_editor_ver": 0, "sent_log_ver": 0}.items():
+    st.session_state.setdefault(_k, _v)
+
+
+def get_sent_log() -> Dict[str, Any]:
+    """Loaded once per session; refreshed after every change (and by the sidebar Refresh button)."""
+    if "sent_log_data" not in st.session_state:
+        st.session_state["sent_log_data"] = SENT_LOG.load()
+    return st.session_state["sent_log_data"]
+
+
+def bump_queue_editor() -> None:
+    st.session_state["queue_editor_ver"] = st.session_state.get("queue_editor_ver", 0) + 1
+
+
+def record_sent(changes: Dict[str, Optional[Dict[str, Any]]]) -> None:
+    """Saves sent ticks/unticks to the permanent log and refreshes every view of it."""
+    local = dict(get_sent_log())
+    try:
+        n_on = sum(1 for v in changes.values() if v)
+        latest = SENT_LOG.apply(changes, f"Prospect Engine: {n_on} marked sent, {len(changes) - n_on} unmarked")
+        st.session_state["sent_log_data"] = latest
+    except Exception as exc:
+        for key, rec in changes.items():  # Keep this session correct even if saving failed
+            if rec is None:
+                local.pop(key, None)
+            else:
+                local[key] = rec
+        st.session_state["sent_log_data"] = local
+        st.session_state["sent_log_error"] = str(exc) if isinstance(exc, RuntimeError) else "Couldn't save the sent log."
+    st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
+    bump_queue_editor()
+
+
+def sent_record(item: Dict[str, Any]) -> Dict[str, Any]:
+    lead: ScrapedLead = item["lead"]
+    return {
+        "company_name": lead.company_name,
+        "to": item.get("to", ""),
+        "contact": infer_contact_name_and_role(lead, item["vertical"])[0],
+        "vertical": item["vertical"],
+        "subject": item.get("subject", ""),
+        "sent_at": now_uk().isoformat(timespec="seconds"),
+        "sent_by": get_sender().get("name", ""),
+    }
+
+
+def add_to_queue(lead: ScrapedLead, vertical: str) -> None:
+    queue = st.session_state.setdefault("queue", {})
+    order = st.session_state.setdefault("queue_order", [])
+    cn = lead.company_number or lead.company_name
+    contact, _ = infer_contact_name_and_role(lead, vertical)
+    queue[cn] = {
+        "lead": lead,
+        "vertical": vertical,
+        "include": True,
+        "to": pick_primary_email(lead, contact) or "",
+        "to_ver": queue.get(cn, {}).get("to_ver", 0) + 1,
+        "subject": None,
+        "body": None,
+        "sig": None,
+    }
+    if cn not in order:
+        order.append(cn)
+    bump_queue_editor()
+
+
+def ensure_draft(item: Dict[str, Any]) -> None:
+    """(Re)builds a firm's subject/body when first needed or when options/signature change."""
+    sig = (item["vertical"], st.session_state["opt_attach"], st.session_state["opt_switch"],
+           tuple(sorted(get_sender().items())))
+    if item.get("sig") != sig or item.get("body") is None:
+        item["subject"] = build_email_subject(item["lead"], item["vertical"])
+        item["body"] = build_email_pitch(
+            item["lead"], item["vertical"],
+            include_attachment_line=st.session_state["opt_attach"],
+            include_switchover=st.session_state["opt_switch"],
+        )
+        item["sig"] = sig
+
+
 
 try:
     secret_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
@@ -2187,6 +2461,23 @@ with st.sidebar:
         '<div class="pe-status">Web discovery<span class="st ok">Ready</span></div>'
         '<div class="pe-status">PDF dossiers<span class="st ok">Ready</span></div>'
     )
+    get_sent_log()
+    if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
+        log_state = 'off">Error'
+    elif SENT_LOG.backend == "github":
+        log_state = 'ok">Saved to GitHub'
+    else:
+        log_state = 'idle">Temporary'
+    render_html(f'<div class="pe-status">Sent log<span class="st {log_state}</span></div>')
+    if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
+        st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
+    elif SENT_LOG.backend == "local":
+        st.caption("Sent ticks reset when the app restarts. Add GITHUB_TOKEN & GITHUB_REPO to Secrets to keep them permanently.")
+    if st.button("↻ Refresh sent log", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
+        st.session_state.pop("sent_log_data", None)
+        st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
+        bump_queue_editor()
+        st.rerun()
     render_html('<div class="pe-side-h">This session</div>')
     sidebar_stats_slot = st.empty()
     render_html('<div class="pe-side-h">Your email signature</div>')
@@ -2289,13 +2580,17 @@ with col_left:
         with st.container(key="card-select"):
             leads_data = st.session_state["discovered_leads"]
             where = st.session_state.get("search_location") or "the UK"
+            log_now = get_sent_log()
+            already = sum(1 for r in leads_data if r.get("Company Number") in log_now)
             section_header(
-                "02", "Select a firm",
+                "02", "Select firms",
                 f"{len(leads_data)} active {'firm' if len(leads_data) == 1 else 'firms'} in {where}"
-                f" · {st.session_state.get('active_vertical_name', '')}",
+                f" · {st.session_state.get('active_vertical_name', '')}"
+                + (f" · {already} already contacted" if already else ""),
             )
 
             df = pd.DataFrame(leads_data)
+            df["Contacted"] = [sent_label(log_now.get(cn)) for cn in df["Company Number"]]
             if "Town / Postcode" in df.columns:
                 df["Town"] = df["Town / Postcode"].astype(str).str.split(",").str[0]
             if "Incorporated" in df.columns:
@@ -2304,58 +2599,102 @@ with col_left:
             table_event = render_leads_table(
                 df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
             )
-            selected_rows = table_event.selection.rows if table_event else []
+            selected_rows = [i for i in (table_event.selection.rows if table_event else []) if i < len(leads_data)]
+            selected = [leads_data[i] for i in selected_rows]
+            st.session_state["selected_rows_data"] = selected
 
-            if selected_rows and selected_rows[0] < len(leads_data):
-                st.session_state["selected_lead_row"] = leads_data[selected_rows[0]]
-            else:
-                # Nothing ticked = nothing selected. Never fall back to row 1.
-                st.session_state["selected_lead_row"] = None
-            target_row = st.session_state["selected_lead_row"]
-
-            if not target_row:
+            if not selected:
                 render_html(
                     f'<div class="pe-hint">{icon("pointer", 16)}'
-                    "Tick the box at the left of a row to choose a firm. Click a column header to sort.</div>"
+                    "Tick one firm, or several to build a batch. Click a column header to sort.</div>"
                 )
             else:
+                n_sel = len(selected)
+                names = ", ".join(esc(friendly_company_name(r["Company Name"])) for r in selected[:3])
+                more = f" + {n_sel - 3} more" if n_sel > 3 else ""
+                contacted_sel = [r for r in selected if r["Company Number"] in log_now]
+                meta = (f'#{esc(selected[0]["Company Number"])} · {esc(selected[0]["Town / Postcode"])}'
+                        if n_sel == 1 else f"{names}{more}")
                 render_html(
-                    f'<div class="pe-selected"><div><div class="n">{esc(target_row["Company Name"])}</div>'
-                    f'<div class="m">#{esc(target_row["Company Number"])} · {esc(target_row["Town / Postcode"])}'
-                    f' · Inc. {esc(target_row.get("Incorporated", "N/A"))}</div></div>'
-                    f'{chip("Selected", "accent")}</div>'
+                    f'<div class="pe-selected"><div><div class="n">'
+                    f'{esc(selected[0]["Company Name"]) if n_sel == 1 else f"{n_sel} firms selected"}</div>'
+                    f'<div class="m">{meta}</div></div>'
+                    f'{chip(f"{n_sel} selected", "accent")}</div>'
                 )
-                e_col1, e_col2 = columns([1.6, 1])
-                with e_col1:
-                    website_override = st.text_input(
-                        "Website (optional)",
-                        placeholder="Leave blank to auto-discover",
+                if contacted_sel:
+                    st.caption(
+                        f"⚠️ {len(contacted_sel)} of these already contacted: "
+                        + ", ".join(friendly_company_name(r["Company Name"]) for r in contacted_sel[:4])
+                        + ("…" if len(contacted_sel) > 4 else "")
                     )
-                with e_col2:
+                if n_sel > MAX_BATCH:
+                    st.warning(f"Batches are capped at {MAX_BATCH} firms. Only the first {MAX_BATCH} will be enriched.")
+
+                website_override = ""
+                if n_sel == 1:
+                    e_col1, e_col2 = columns([1.6, 1])
+                    with e_col1:
+                        website_override = st.text_input(
+                            "Website (optional)", placeholder="Leave blank to auto-discover",
+                        )
+                    with e_col2:
+                        enrich_btn = st.button("Enrich & build dossier", type="primary", **FULL_WIDTH)
+                else:
                     enrich_btn = st.button(
-                        "Enrich & build dossier", type="primary", **FULL_WIDTH
+                        f"Enrich {min(n_sel, MAX_BATCH)} firms & add to review queue", type="primary", **FULL_WIDTH
                     )
 
                 if enrich_btn:
-                    with st.spinner("Finding the firm's website and scraping contact channels…"):
-                        enricher = LeadEnricher(ch_api_key=ch_api_key)
-                        current_vertical = st.session_state.get(
-                            "active_vertical_name", "Estate & Lettings Agents"
+                    batch = selected[:MAX_BATCH]
+                    vertical_now = st.session_state.get("active_vertical_name", "Estate & Lettings Agents")
+                    progress = st.progress(0.0, text="Starting enrichment…")
+
+                    def _enrich(row: Dict[str, Any]) -> ScrapedLead:
+                        return LeadEnricher(ch_api_key=ch_api_key).enrich_selected_company(
+                            company_number=row["Company Number"],
+                            sector_name=vertical_now,
+                            manual_website=website_override if len(batch) == 1 else None,
                         )
-                        enriched_lead = enricher.enrich_selected_company(
-                            company_number=target_row["Company Number"],
-                            sector_name=current_vertical,
-                            manual_website=website_override,
-                        )
-                        st.session_state["current_lead"] = enriched_lead
-                        st.session_state.pop("draft_sig", None)
-                        st.session_state["stat_dossiers"] += 1
+
+                    results: Dict[str, ScrapedLead] = {}
+                    failures: List[str] = []
+                    with ThreadPoolExecutor(max_workers=min(4, len(batch))) as pool:
+                        futures = {pool.submit(_enrich, row): row for row in batch}
+                        for done, fut in enumerate(as_completed(futures), start=1):
+                            row = futures[fut]
+                            try:
+                                results[row["Company Number"]] = fut.result()
+                            except Exception:
+                                failures.append(friendly_company_name(row["Company Name"]))
+                            progress.progress(
+                                done / len(batch),
+                                text=f"Enriched {done} of {len(batch)} · {friendly_company_name(row['Company Name'])}",
+                            )
+                    progress.empty()
+
+                    first_cn = None
+                    for row in batch:  # Keep the table's order in the queue
+                        cn = row["Company Number"]
+                        if cn in results:
+                            add_to_queue(results[cn], vertical_now)
+                            first_cn = first_cn or cn
+                    if first_cn:
+                        st.session_state["current_cn"] = first_cn
+                        st.session_state["current_cn_select"] = first_cn
+                    st.session_state["stat_dossiers"] += len(results)
+                    if failures:
+                        st.warning("Couldn't enrich: " + ", ".join(failures))
+                    if len(batch) > 1 and results:
+                        st.success(f"{len(results)} firms added to the review queue below.")
 
 
 # ---------------- Right: Dossier ----------------
+queue: Dict[str, Dict[str, Any]] = st.session_state.setdefault("queue", {})
+queue_order: List[str] = [cn for cn in st.session_state.setdefault("queue_order", []) if cn in queue]
+
 with col_right:
     with st.container(key="card-right"):
-        if "current_lead" not in st.session_state:
+        if not queue:
             render_html(
                 f'<div class="pe-empty"><div style="color:var(--accent);display:inline-block;'
                 f'padding:18px;border-radius:20px;background:var(--accent-soft);border:1px solid rgba(124,131,255,.3)">'
@@ -2363,24 +2702,40 @@ with col_right:
                 '<div class="t">Your dossier will appear here</div>'
                 '<div class="s">Every enriched firm gets a contact card, verified channels,'
                 ' a sector integration pitch and a one-page PDF.</div>'
-                "<ol><li>Choose a sector &amp; territory</li><li>Tick a firm in the results</li>"
-                "<li>Hit <b>&nbsp;Enrich &amp; build dossier</b></li></ol></div>"
+                "<ol><li>Choose a sector &amp; territory</li><li>Tick one or more firms</li>"
+                "<li>Hit <b>&nbsp;Enrich</b></li></ol></div>"
             )
         else:
-            lead: ScrapedLead = st.session_state["current_lead"]
-            current_vert_name = st.session_state.get(
-                "active_vertical_name", "Estate & Lettings Agents"
-            )
+            log_now = get_sent_log()
+            if st.session_state.get("current_cn") not in queue:
+                st.session_state["current_cn"] = queue_order[0]
+            if len(queue_order) > 1:
+                if st.session_state.get("current_cn_select") not in queue:
+                    st.session_state["current_cn_select"] = st.session_state["current_cn"]
+                st.selectbox(
+                    f"Viewing firm ({len(queue_order)} in queue)",
+                    options=queue_order,
+                    key="current_cn_select",
+                    format_func=lambda c: ("✓ " if c in log_now else "") + friendly_company_name(queue[c]["lead"].company_name),
+                )
+                st.session_state["current_cn"] = st.session_state["current_cn_select"]
+            cn = st.session_state["current_cn"]
+            item = queue[cn]
+            lead: ScrapedLead = item["lead"]
+            current_vert_name = item["vertical"]
             vert_cfg = VERTICAL_PRESETS[current_vert_name]
             contact_name, contact_role = infer_contact_name_and_role(lead, current_vert_name)
             primary_email = pick_primary_email(lead, contact_name)
+            is_sent = cn in log_now
 
-            section_header("03", "Lead dossier", "Review, tailor the pitch and export.")
+            section_header("03", "Lead dossier", "Review, tailor the pitch and send.")
 
             # Firm header
             meta = [chip(f"#{lead.company_number or 'N/A'}"), chip(current_vert_name, "accent")]
             meta += [chip(f"SIC {c}", "muted") for c in lead.sic_codes[:2]]
             meta.append(confidence_chip(lead.website_confidence if lead.website_url else None))
+            if is_sent:
+                meta.append(chip(f"Sent {sent_label(log_now[cn])[2:]}", "good"))
             blurb = (
                 f'<div class="blurb">“{esc(lead.site_meta_description[:220])}'
                 f'{"…" if len(lead.site_meta_description) > 220 else ""}”</div>'
@@ -2393,16 +2748,16 @@ with col_right:
 
             if not lead.website_url:
                 st.warning(
-                    "Couldn't confidently find this firm's website. Paste it into the"
-                    " Website box on the left and re-run to pull contacts."
+                    "Couldn't confidently find this firm's website. Tick just this firm on the left,"
+                    " paste its website and re-run to pull contacts."
                 )
             elif lead.website_confidence == "Low":
                 st.warning(
-                    "Weak website match. Check it's the right firm before sending, or"
-                    " paste the correct website on the left and re-run."
+                    "Weak website match. Check it's the right firm before sending, or tick just this"
+                    " firm on the left, paste the correct website and re-run."
                 )
 
-            tab1, tab2 = st.tabs(["Overview", "Pitch & PDF"])
+            tab1, tab2 = st.tabs(["Overview", "Pitch & send"])
 
             with tab1:
                 # Contact + channels
@@ -2469,33 +2824,34 @@ with col_right:
             with tab2:
                 o1, o2 = st.columns(2)
                 with o1:
-                    attach_overview = st.toggle("Attach sector overview", value=True, key="opt_attach",
-                                                help="Adds a line to the email and gives you the branded PDF to attach.")
+                    st.session_state["opt_attach"] = st.toggle(
+                        "Attach sector overview", value=st.session_state["opt_attach"], key="w_opt_attach",
+                        help="Adds a line to the email and attaches the branded PDF to drafts.")
                 with o2:
-                    include_switch = st.toggle("Mention Jan 2027 switch-off", value=True, key="opt_switch")
+                    st.session_state["opt_switch"] = st.toggle(
+                        "Mention Jan 2027 switch-off", value=st.session_state["opt_switch"], key="w_opt_switch")
+                attach_overview = st.session_state["opt_attach"]
 
-                # Rebuild the draft when the lead, options or signature change (not on every keystroke)
-                sender_now = get_sender()
-                draft_sig = (lead.company_number, current_vert_name, attach_overview, include_switch,
-                             tuple(sorted(sender_now.items())))
-                if st.session_state.get("draft_sig") != draft_sig:
-                    st.session_state["email_to"] = primary_email or ""
-                    st.session_state["email_subject"] = build_email_subject(lead, current_vert_name)
-                    st.session_state["email_body"] = build_email_pitch(
-                        lead, current_vert_name,
-                        include_attachment_line=attach_overview,
-                        include_switchover=include_switch,
-                    )
-                    st.session_state["draft_sig"] = draft_sig
+                ensure_draft(item)
+                # Push this firm's saved draft into the editor when switching firms or after a rebuild
+                widget_sig = (cn, item["sig"], item.get("to_ver", 0))
+                if st.session_state.get("email_widget_sig") != widget_sig:
+                    st.session_state["email_to"] = item["to"]
+                    st.session_state["email_subject"] = item["subject"]
+                    st.session_state["email_body"] = item["body"]
+                    st.session_state["email_widget_sig"] = widget_sig
 
                 email_to = st.text_input("To", key="email_to", placeholder="name@firm.co.uk")
                 email_subject = st.text_input("Subject", key="email_subject")
                 edited_pitch = st.text_area("Email body", key="email_body", height=380)
+                if email_to != item["to"]:
+                    bump_queue_editor()  # Keep the review table in step with the To box
+                item.update(to=email_to, subject=email_subject, body=edited_pitch)
                 if lead.emails_found and len(lead.emails_found) > 1:
                     st.caption("Other addresses found: " + ", ".join(e for e in lead.emails_found if e != email_to))
 
                 mailto_url = build_mailto(email_to, email_subject, edited_pitch)
-                friendly = re.sub(r"[^A-Za-z0-9]+", "_", friendly_company_name(lead.company_name)).strip("_")
+                friendly = draft_filename_part(lead.company_name)
                 sector_slug = re.sub(r"[^A-Za-z0-9]+", "_", SECTOR_COPY.get(current_vert_name, {}).get("sector_plural", "sector")).strip("_")
 
                 overview_name = f"SY_Communications_{sector_slug}_overview_{friendly}.pdf"
@@ -2543,6 +2899,22 @@ with col_right:
                         mime="application/pdf",
                         **FULL_WIDTH,
                     )
+
+                # Sent tick: saved to the permanent log, so it's there next time anyone opens the app
+                sent_now = st.checkbox(
+                    "✅  Sent: tick once this email has gone",
+                    value=is_sent,
+                    key=f"sent_chk_{cn}_{st.session_state.get('sent_log_ver', 0)}",
+                    help="Saved permanently, and shows as Contacted in future searches.",
+                )
+                if sent_now != is_sent:
+                    record_sent({cn: sent_record(item) if sent_now else None})
+                    st.rerun()
+                if is_sent:
+                    rec = log_now[cn]
+                    who = f" by {rec['sent_by']}" if rec.get("sent_by") else ""
+                    st.caption(f"Marked sent{who} on {sent_label(rec)[2:]} to {rec.get('to') or 'unknown address'}.")
+
                 tips = []
                 if len(mailto_url) > 1900:
                     tips.append("This email is long, so the 'Email only' button may cut it short in some apps. The draft file isn't affected.")
@@ -2557,10 +2929,116 @@ with col_right:
                     st.code(edited_pitch, language=None)
 
 
+# ---------------- Review queue (full width) ----------------
+if queue:
+    with st.container(key="card-queue"):
+        log_now = get_sent_log()
+        for c in queue_order:
+            ensure_draft(queue[c])
+        n_total = len(queue_order)
+        n_sent = sum(1 for c in queue_order if c in log_now)
+        n_ready = sum(1 for c in queue_order if queue[c]["include"] and queue[c]["to"] and c not in log_now)
+        section_header(
+            "04", "Review & send",
+            f"{n_total} enriched · {n_ready} ready to send · {n_sent} sent. Untick anything that looks off,"
+            " fix emails inline, then export the batch or send one at a time from the dossier.",
+        )
+
+        qdf = pd.DataFrame([
+            {
+                "cn": c,
+                "Include": bool(queue[c]["include"]),
+                "Sent": c in log_now,
+                "Firm": friendly_company_name(queue[c]["lead"].company_name),
+                "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
+                "Email": queue[c]["to"] or "",
+                "Phone": (queue[c]["lead"].phones_found or [""])[0],
+                "Website match": (queue[c]["lead"].website_confidence or "Not found") if queue[c]["lead"].website_url else "Not found",
+            }
+            for c in queue_order
+        ])
+        editor_kwargs = dict(
+            hide_index=True,
+            num_rows="fixed",
+            key=f"queue_editor_{st.session_state.get('queue_editor_ver', 0)}",
+            column_order=["Include", "Sent", "Firm", "Contact", "Email", "Phone", "Website match"],
+            disabled=["Firm", "Contact", "Phone", "Website match"],
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Include", width="small", help="Untick to leave out of the batch export"),
+                "Sent": st.column_config.CheckboxColumn("Sent ✓", width="small", help="Tick once emailed. Saved permanently."),
+                "Firm": st.column_config.TextColumn("Firm", width="medium"),
+                "Contact": st.column_config.TextColumn("Contact", width="small"),
+                "Email": st.column_config.TextColumn("Email (editable)", width="medium"),
+                "Phone": st.column_config.TextColumn("Phone", width="small"),
+                "Website match": st.column_config.TextColumn("Website match", width="small"),
+            },
+        )
+        try:
+            edited = st.data_editor(qdf, width="stretch", **editor_kwargs)
+        except Exception:
+            edited = st.data_editor(qdf, use_container_width=True, **editor_kwargs)
+
+        # Apply edits from the table
+        sent_changes: Dict[str, Optional[Dict[str, Any]]] = {}
+        for _, row in edited.iterrows():
+            c = row["cn"]
+            if c not in queue:
+                continue
+            queue[c]["include"] = bool(row["Include"])
+            new_to = str(row["Email"] or "").strip()
+            if new_to != queue[c]["to"]:
+                queue[c]["to"] = new_to
+                queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
+            if bool(row["Sent"]) != (c in log_now):
+                sent_changes[c] = sent_record(queue[c]) if row["Sent"] else None
+        if sent_changes:
+            record_sent(sent_changes)
+            st.rerun()
+
+        export_items = [queue[c] for c in queue_order if queue[c]["include"] and c not in log_now]
+        a1, a2, a3 = columns([1.6, 1.2, 0.8])
+        with a1:
+            if export_items:
+                zip_bytes, n_written, skipped = build_drafts_zip(export_items, st.session_state["opt_attach"])
+                st.download_button(
+                    f"📦  Download {n_written} Outlook drafts (.zip)",
+                    data=zip_bytes,
+                    file_name=f"SY_Communications_drafts_{now_uk().strftime('%Y-%m-%d_%H%M')}.zip",
+                    mime="application/zip",
+                    type="primary",
+                    disabled=n_written == 0,
+                    **FULL_WIDTH,
+                )
+            else:
+                skipped = []
+                st.button("📦  Nothing left to export", disabled=True, **FULL_WIDTH)
+        with a2:
+            mark_ids = [c for c in queue_order if queue[c]["include"] and queue[c]["to"] and c not in log_now]
+            if st.button(f"✅  Mark {len(mark_ids)} as sent", disabled=not mark_ids, **FULL_WIDTH,
+                         help="Use after you've sent the exported drafts."):
+                record_sent({c: sent_record(queue[c]) for c in mark_ids})
+                st.rerun()
+        with a3:
+            if st.button("Clear queue", **FULL_WIDTH):
+                st.session_state["queue"] = {}
+                st.session_state["queue_order"] = []
+                bump_queue_editor()
+                st.rerun()
+        notes = [
+            "The zip holds one ready-to-send Outlook draft per firm"
+            + (", each with its own personalised PDF attached" if st.session_state["opt_attach"] else "")
+            + ", plus a summary spreadsheet. Unzip, open each draft, check it, hit Send, then tick Sent ✓ here."
+        ]
+        if skipped:
+            notes.append("No email address (left out of the zip): " + ", ".join(skipped) + ". Add one in the Email column.")
+        for note in notes:
+            st.caption("💡 " + note)
+
+
 # ---------------- Late-rendered pieces (reflect this run's state) ----------------
-if "current_lead" in st.session_state:
+if queue:
     active_step = 4
-elif st.session_state.get("selected_lead_row"):
+elif st.session_state.get("selected_rows_data"):
     active_step = 3
 elif st.session_state.get("discovered_leads"):
     active_step = 2
@@ -2569,9 +3047,9 @@ else:
 render_html(hero_html(active_step), target=hero_slot)
 render_html(
     '<div class="pe-stats">'
-    f'<div class="pe-stat"><div class="v">{st.session_state["stat_searches"]}</div><div class="l">Searches</div></div>'
     f'<div class="pe-stat"><div class="v">{st.session_state["stat_firms"]}</div><div class="l">Firms</div></div>'
-    f'<div class="pe-stat"><div class="v">{st.session_state["stat_dossiers"]}</div><div class="l">Dossiers</div></div>'
+    f'<div class="pe-stat"><div class="v">{len(queue)}</div><div class="l">Enriched</div></div>'
+    f'<div class="pe-stat"><div class="v">{len(get_sent_log())}</div><div class="l">Sent</div></div>'
     "</div>",
     target=sidebar_stats_slot,
 )
