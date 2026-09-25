@@ -5,6 +5,8 @@ import io
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
+from email.message import EmailMessage
+from email.utils import formatdate
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -1645,6 +1647,50 @@ def build_email_pitch(
     return "\n\n".join(parts)
 
 
+def _email_body_html(body: str) -> str:
+    """Turns the plain-text email into simple, clean HTML (paragraphs, bullet list, signature)."""
+    blocks, out = [b for b in body.replace("\r\n", "\n").split("\n\n")], []
+    for block in blocks:
+        lines = [l for l in block.split("\n") if l.strip() != ""] or [""]
+        if all(l.lstrip().startswith("- ") for l in lines):
+            items = "".join(f"<li>{html_lib.escape(l.lstrip()[2:])}</li>" for l in lines)
+            out.append(f'<ul style="margin:0 0 14px 0;padding-left:20px">{items}</ul>')
+        else:
+            text = "<br>".join(html_lib.escape(l) for l in block.split("\n"))
+            style = "margin:0 0 14px 0"
+            if block.startswith("P.S."):
+                style += ";color:#6b7280;font-size:12px"
+            out.append(f'<p style="{style}">{text}</p>')
+    return (
+        '<html><body style="font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.45;color:#1f2937">'
+        + "".join(out) + "</body></html>"
+    )
+
+
+def build_eml_draft(
+    to: str,
+    subject: str,
+    body: str,
+    attachments: Optional[List[Tuple[str, bytes]]] = None,
+) -> bytes:
+    """A ready-to-send email draft (.eml) with attachments.
+
+    Outlook for Windows opens it as an unsent draft (thanks to the X-Unsent header),
+    with the To, Subject, formatted body and PDF already in place.
+    """
+    msg = EmailMessage()
+    if to:
+        msg["To"] = to
+    msg["Subject"] = subject or ""
+    msg["Date"] = formatdate(localtime=True)
+    msg["X-Unsent"] = "1"  # Tells Outlook to open this as a new draft, not a received email
+    msg.set_content(body.replace("\r\n", "\n"))
+    msg.add_alternative(_email_body_html(body), subtype="html")
+    for filename, data in attachments or []:
+        msg.add_attachment(data, maintype="application", subtype="pdf", filename=filename)
+    return msg.as_bytes()
+
+
 def build_mailto(to: str, subject: str, body: str) -> str:
     """mailto: link that opens the user's default email app with everything filled in."""
     body_crlf = body.replace("\r\n", "\n").replace("\n", "\r\n")
@@ -2452,14 +2498,35 @@ with col_right:
                 friendly = re.sub(r"[^A-Za-z0-9]+", "_", friendly_company_name(lead.company_name)).strip("_")
                 sector_slug = re.sub(r"[^A-Za-z0-9]+", "_", SECTOR_COPY.get(current_vert_name, {}).get("sector_plural", "sector")).strip("_")
 
-                st.link_button("✉️  Open in my email app", mailto_url, type="primary", **FULL_WIDTH)
-                b2, b3 = st.columns(2)
+                overview_name = f"SY_Communications_{sector_slug}_overview_{friendly}.pdf"
+                overview_bytes = create_sector_overview_pdf(lead, current_vert_name) if attach_overview else None
+                eml_bytes = build_eml_draft(
+                    email_to, email_subject, edited_pitch,
+                    attachments=[(overview_name, overview_bytes)] if overview_bytes else None,
+                )
+                st.download_button(
+                    label=("📎  Email draft with PDF attached" if attach_overview else "📎  Email draft (.eml)"),
+                    data=eml_bytes,
+                    file_name=f"Email_to_{friendly}.eml",
+                    mime="message/rfc822",
+                    type="primary",
+                    help="Downloads a ready-to-send draft. Click the downloaded file to open it in Outlook with the PDF attached.",
+                    **FULL_WIDTH,
+                )
+                st.caption(
+                    "Click the downloaded file to open it in Outlook as a new draft with the PDF attached,"
+                    " then check it and hit Send. (Apple Mail: open it, then Message → Send Again.)"
+                )
+                b1, b2, b3 = st.columns(3)
+                with b1:
+                    st.link_button("✉️ Email only", mailto_url, **FULL_WIDTH,
+                                   help="Opens your email app with the text filled in (no attachment). Handy for Gmail.")
                 with b2:
-                    if attach_overview:
+                    if overview_bytes:
                         st.download_button(
                             label="⬇ Overview PDF",
-                            data=create_sector_overview_pdf(lead, current_vert_name),
-                            file_name=f"SY_Communications_{sector_slug}_overview_{friendly}.pdf",
+                            data=overview_bytes,
+                            file_name=overview_name,
                             mime="application/pdf",
                             **FULL_WIDTH,
                         )
@@ -2477,12 +2544,10 @@ with col_right:
                         **FULL_WIDTH,
                     )
                 tips = []
-                if attach_overview:
-                    tips.append("Email links can't carry attachments: download the overview first, then drag it into the email.")
                 if len(mailto_url) > 1900:
-                    tips.append("This email is long, so some email apps may cut it short. If so, use the copy box below.")
+                    tips.append("This email is long, so the 'Email only' button may cut it short in some apps. The draft file isn't affected.")
                 if not email_to:
-                    tips.append("No email address found. Add one in the To box before opening your email app.")
+                    tips.append("No email address found. Add one in the To box first.")
                 for tip in tips:
                     st.caption("💡 " + tip)
 
