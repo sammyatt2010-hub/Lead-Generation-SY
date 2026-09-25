@@ -2,7 +2,7 @@ import base64
 import hmac
 import io
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -67,131 +67,75 @@ VERTICAL_PRESETS = {
         "description": "Real estate agencies & letting operations",
         "search_hint": "Estate Agents",
         "crms": ["Street", "Alto", "Reapit", "Dezrez", "Jupix"],
-        "primary_hook": "CRM Screen-Pop & Property File Sync",
+        "primary_hook": "CRM Integration (Street / Alto / Reapit)",
+        "fallback_greeting": "Lettings & Sales Team",
         "pitch_bullets": [
-            (
-                "Screen pop-up of the client or landlord record the moment"
-                " their call comes in"
-            ),
-            (
-                "Automatic voice recording & call logging synced straight to"
-                " the property file"
-            ),
-            "Click to dial directly from your CRM / property management portal",
-            (
-                "Never miss an applicant lead - missed calls instantly flagged"
-                " for callback"
-            ),
+            "Screen pop-up of every client or landlord record the moment they call",
+            "Automatic voice recording syncing directly to the property file",
+            "Click to dial directly inside your CRM / property portal",
+            "Every lead, missed call & call note tracked automatically",
         ],
-        "default_cta": (
-            "Let me know roughly how many handsets or softphones you use"
-            " across the team, and I can put together a quick, no-obligation"
-            " quote."
-        ),
+        "default_cta": "Let me know how many phones or softphone users you have, and I'll send over a quote.",
     },
     "Dental Practices": {
         "sic_codes": ["86230"],
         "description": "Dental practice activities",
         "search_hint": "Dental Practice",
-        "crms": ["Dentally", "EXACT (SOE)", "Carestream R4"],
-        "primary_hook": "Patient Management System (PMS) Pop & Recall Tracking",
+        "crms": ["Dentally", "EXACT", "Carestream R4"],
+        "primary_hook": "PMS Integration (Dentally / EXACT / R4)",
+        "fallback_greeting": "Practice Manager",
         "pitch_bullets": [
-            (
-                "Patient record pops on the reception screen the instant the"
-                " phone rings"
-            ),
-            (
-                "Calls and appointment notes log automatically against the"
-                " patient chart"
-            ),
-            (
-                "Missed inbound calls flagged immediately to protect patient"
-                " booking retention"
-            ),
-            (
-                "Call recordings stored securely and compliantly against the"
-                " patient record"
-            ),
+            "Patient records pop up on reception screens when the phone rings",
+            "Calls log automatically against the right patient chart",
+            "Missed calls are flagged instantly for follow up and recall retention",
+            "Call recordings are stored compliantly against the patient file",
         ],
-        "default_cta": (
-            "How many surgery handsets or reception lines does the practice"
-            " run? I can share a tailored overview and cost comparison."
-        ),
+        "default_cta": "How many handsets does the practice currently use? I can send over a no obligation quote.",
     },
     "Solicitors & Legal Practices": {
         "sic_codes": ["69102"],
         "description": "Solicitors & legal service providers",
         "search_hint": "Solicitors",
         "crms": ["Clio", "LEAP", "Proclaim", "Actionstep"],
-        "primary_hook": "Matter-Centric Telephony & Fee-Earner Mobility",
+        "primary_hook": "Matter Management Integration (Clio / LEAP)",
+        "fallback_greeting": "Practice Manager",
         "pitch_bullets": [
-            (
-                "Dial directly out of active client or matter records in your"
-                " practice management system"
-            ),
-            (
-                "Softphone & mobile apps so fee earners take work calls securely"
-                " anywhere"
-            ),
-            (
-                "Single unified system spanning reception, remote fee earners,"
-                " and all branch offices"
-            ),
-            (
-                "Billable call duration & time tracking logged back to the"
-                " client matter"
-            ),
+            "Dial straight from the active client or matter record",
+            "Mobile & desktop softphone app so fee earners can take calls securely anywhere",
+            "One unified system across reception, every fee earner and all branch offices",
+            "Call recordings & billable duration synced back to the matter file",
         ],
-        "default_cta": (
-            "Let me know which practice management system you run and your"
-            " user count, and I'll send over a breakdown."
-        ),
+        "default_cta": "Let me know which system you run and roughly how many users you have, and I'll send over a quote.",
     },
     "Accountants & Auditors": {
         "sic_codes": ["69201"],
         "description": "Accounting, bookkeeping & tax consultancy",
         "search_hint": "Accountants",
         "crms": ["Iris", "CCH", "TaxCalc", "Xero Practice Manager"],
-        "primary_hook": "Client Record Pop & Hybrid Advisory Telephony",
+        "primary_hook": "Client Portal & Time Tracking Integration",
+        "fallback_greeting": "Practice Partner",
         "pitch_bullets": [
-            "Client identification & contact card pop-up on inbound calls",
-            "Automatic call logging against client tax and audit folders",
-            (
-                "Seamless call transferring between office desk phones and"
-                " laptop softphones"
-            ),
-            (
-                "Consolidated line billing to reduce standard landline rental"
-                " overheads"
-            ),
+            "Client identification card pops on screen the moment they call",
+            "Automatic call logging against client tax and year-end audit folders",
+            "Seamless transfer between desk phones and laptop softphones for hybrid staff",
+            "Consolidated line rental and cloud voice to reduce fixed telecom overheads",
         ],
-        "default_cta": (
-            "Drop me a quick note with your team size and I'll send over a"
-            " tailored specification."
-        ),
+        "default_cta": "Let me know your approximate team size and I can send over an indicative quote.",
     },
     "General Medical Clinics": {
         "sic_codes": ["86210"],
         "description": "General medical practice activities",
         "search_hint": "Clinic",
         "crms": ["EMIS Web", "SystmOne", "Semble", "Heydoc"],
-        "primary_hook": "Clinical Triage & Patient Line Management",
+        "primary_hook": "Clinical System Integration & Triage Routing",
+        "fallback_greeting": "Clinic Manager",
         "pitch_bullets": [
-            (
-                "Patient record screen-pop to accelerate inbound reception"
-                " triage"
-            ),
+            "Patient record screen-pop to accelerate inbound triage",
             "Automated call queueing & peak-time patient callback features",
-            "Compliant, encrypted voice recording stored per patient file",
-            (
-                "Direct transfer lines between triage staff, clinicians, and"
-                " administration"
-            ),
+            "Encrypted, compliant voice recordings stored per patient file",
+            "Direct transfer lines between triage staff, clinicians, and administration",
         ],
-        "default_cta": (
-            "Let me know how many lines you operate and I can provide an"
-            " indicative setup plan."
-        ),
+        "default_cta": "How many lines or handsets do you operate? I can send over a no obligation overview.",
     },
 }
 
@@ -570,28 +514,76 @@ def sanitize_pdf_text(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def infer_contact_name_and_role(
+    lead: ScrapedLead, vertical_key: str
+) -> Tuple[str, str]:
+    """Smart contact resolver: extracts personal names from officers or email prefixes."""
+    vert_cfg = VERTICAL_PRESETS.get(
+        vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
+    )
+
+    # 1. Primary Officer match
+    if lead.officers:
+        top_officer = lead.officers[0]
+        # Clean standard UK Companies House officer formats (e.g. "BYWATER, Paul" or "Paul BYWATER")
+        raw_name = top_officer.name.replace(",", " ")
+        parts = [p.capitalize() for p in raw_name.split() if p.isalpha()]
+        if parts:
+            first_name = parts[0]
+            role = top_officer.role
+            return first_name, role
+
+    # 2. Email Prefix Extraction (e.g. sarah@hartnewhomes.co.uk -> Sarah)
+    generic_prefixes = {
+        "info",
+        "enquiries",
+        "sales",
+        "lettings",
+        "office",
+        "admin",
+        "contact",
+        "mail",
+        "reception",
+        "support",
+        "help",
+        "hello",
+    }
+    if lead.emails_found:
+        for em in lead.emails_found:
+            prefix = em.split("@")[0].lower()
+            # check if it looks like a person's name (e.g. sarah, david.mann, p.bywater)
+            prefix_clean = re.sub(r"[0-9]", "", prefix)
+            if prefix_clean and prefix_clean not in generic_prefixes:
+                name_candidate = prefix_clean.split(".")[0].capitalize()
+                if len(name_candidate) >= 3:
+                    return (
+                        name_candidate,
+                        f"Direct Contact ({em})",
+                    )
+
+    # 3. Fallback to vertical-specific role
+    return vert_cfg["fallback_greeting"], "Team / Branch Management"
+
+
 def build_email_pitch(lead: ScrapedLead, vertical_key: str) -> str:
     config = VERTICAL_PRESETS.get(
         vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
     )
-    recipient_name = (
-        lead.officers[0].name.split()[0].title()
-        if lead.officers
-        else "Team"
-    )
+    first_name, _ = infer_contact_name_and_role(lead, vertical_key)
     crms_str = " / ".join(config["crms"][:3])
 
     bullets_text = "\n".join([f"- {b}" for b in config["pitch_bullets"]])
 
-    email_text = f"""Hi {recipient_name},
+    # Personalised opening matching the reference lead style
+    email_text = f"""Hi {first_name},
 
 I hope you're well.
 
-We work with a number of firms across the sector connecting their telephony directly into their core management systems ({crms_str}) so that:
+We work with a number of firms across the sector connecting their telephony directly into their core systems ({crms_str}) so that:
 
 {bullets_text}
 
-{config['default_cta']}
+Let me know which system {lead.company_name} uses and roughly how many handsets or users you have, and I'll send over a quote.
 
 Kind regards,
 Commercial Telephony Solutions"""
@@ -601,19 +593,31 @@ Commercial Telephony Solutions"""
 class LeadDossierPDF(FPDF):
 
     def header(self):
-        self.set_fill_color(26, 32, 44)
-        self.rect(0, 0, 210, 16, "F")
+        self.set_fill_color(30, 41, 59)  # Dark slate header bar
+        self.rect(0, 0, 210, 14, "F")
         self.set_text_color(255, 255, 255)
-        self.set_font("Helvetica", "B", 10)
-        self.set_xy(12, 4)
-        self.cell(0, 8, "CONFIDENTIAL TARGET DOSSIER | COMMERCIAL BRIEFING", ln=0)
-        self.ln(16)
+        self.set_font("Helvetica", "B", 9)
+        self.set_xy(12, 3)
+        self.cell(
+            0,
+            8,
+            "BUSINESS CONNECTIVITY | CONFIDENTIAL LEAD RECORD",
+            ln=0,
+        )
+        self.ln(14)
 
     def footer(self):
-        self.set_y(-12)
-        self.set_font("Helvetica", "I", 8)
-        self.set_text_color(150, 150, 150)
-        self.cell(0, 8, "Generated for internal sales review", 0, 0, "C")
+        self.set_y(-10)
+        self.set_font("Helvetica", "", 7.5)
+        self.set_text_color(148, 163, 184)
+        self.cell(
+            0,
+            6,
+            "Confidential lead record - Generated for internal sales review",
+            0,
+            0,
+            "C",
+        )
 
 
 def create_pdf_dossier(
@@ -623,95 +627,104 @@ def create_pdf_dossier(
     target_crms: List[str],
 ) -> bytes:
     pdf = LeadDossierPDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=12)
     pdf.add_page()
 
-    # Section 1: Firm & Registration Details
-    pdf.set_font("Helvetica", "B", 15)
-    pdf.set_text_color(17, 24, 39)
-    pdf.cell(0, 8, sanitize_pdf_text(lead.company_name[:50]), ln=True)
+    contact_name, contact_role = infer_contact_name_and_role(
+        lead, vertical_name
+    )
 
-    pdf.set_font("Helvetica", "", 10)
-    pdf.set_text_color(75, 85, 99)
-    meta_line = f"Vertical: {vertical_name}  |  Company #{lead.company_number or 'N/A'}  |  SIC: {', '.join(lead.sic_codes) or 'Active'}"
-    pdf.cell(0, 6, sanitize_pdf_text(meta_line), ln=True)
+    # 1. PRIMARY CONTACT CARD
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 4, "PRIMARY CONTACT", ln=True)
 
-    if lead.registered_address:
-        pdf.cell(
-            0,
-            6,
-            sanitize_pdf_text(f"Registered Office: {lead.registered_address[:80]}"),
-            ln=True,
-        )
-    if lead.website_url:
-        pdf.cell(
-            0,
-            6,
-            sanitize_pdf_text(f"Website: {lead.website_url[:80]}"),
-            ln=True,
-        )
-
-    pdf.ln(4)
-    pdf.set_draw_color(229, 231, 235)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    pdf.ln(6)
-
-    # Section 2: Key Contacts & Officers
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_text_color(31, 41, 55)
-    pdf.cell(0, 6, "PRIMARY CONTACTS & REGISTRY OFFICERS", ln=True)
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 7, sanitize_pdf_text(contact_name), ln=True)
 
     pdf.set_font("Helvetica", "", 9)
-    pdf.set_text_color(55, 65, 81)
-    if lead.officers:
-        for off in lead.officers[:4]:
-            pdf.cell(
-                0,
-                5,
-                sanitize_pdf_text(
-                    f"- {off.name} ({off.role}) - Appointed: {off.appointed_on or 'N/A'}"
-                ),
-                ln=True,
-            )
-    else:
-        pdf.cell(0, 5, "- No registered officers returned via API", ln=True)
+    pdf.set_text_color(71, 85, 105)
+    primary_email = lead.emails_found[0] if lead.emails_found else "Email TBD"
+    primary_phone = (
+        lead.phones_found[0] if lead.phones_found else "Phone TBD"
+    )
+    contact_sub = f"{contact_role} - {primary_email} - {primary_phone}"
+    pdf.cell(0, 5, sanitize_pdf_text(contact_sub), ln=True)
 
-    pdf.ln(2)
-    emails_str = ", ".join(lead.emails_found) if lead.emails_found else "None"
-    phones_str = ", ".join(lead.phones_found) if lead.phones_found else "None"
-    pdf.cell(0, 5, sanitize_pdf_text(f"Discovered Email(s): {emails_str}"), ln=True)
-    pdf.cell(0, 5, sanitize_pdf_text(f"Discovered Phone(s): {phones_str}"), ln=True)
+    pdf.ln(3)
 
-    pdf.ln(4)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    pdf.ln(6)
+    # 2. FIRM CARD
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 4, "TARGET FIRM", ln=True)
 
-    # Section 3: Sector CRM Target & Angles
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 6, "SECTOR INTEGRATION HOOK", ln=True)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.set_text_color(15, 23, 42)
+    pdf.cell(0, 6, sanitize_pdf_text(lead.company_name[:55]), ln=True)
 
-    pdf.set_font("Helvetica", "", 9)
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(71, 85, 105)
+    addr_line = lead.registered_address or "Address not listed"
+    site_line = lead.website_url or "Website not specified"
     pdf.cell(
         0,
         5,
-        sanitize_pdf_text(f"Typical Sector CRMs/PMS: {', '.join(target_crms)}"),
+        sanitize_pdf_text(
+            f"{vertical_name} - {addr_line[:65]} - Company"
+            f" #{lead.company_number or 'N/A'}"
+        ),
         ln=True,
     )
+    pdf.cell(0, 5, sanitize_pdf_text(f"Domain: {site_line}"), ln=True)
+
+    if lead.site_meta_description:
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(100, 116, 139)
+        pdf.multi_cell(
+            190, 4, sanitize_pdf_text(f'"{lead.site_meta_description[:200]}"')
+        )
+
+    pdf.ln(2)
+    pdf.set_draw_color(226, 232, 240)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
     pdf.ln(4)
 
-    # Section 4: Tailored Outreach Pitch Draft
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 6, "TAILORED OUTREACH EMAIL DRAFT", ln=True)
+    # 3. CORE INTEGRATION HOOK
+    vert_cfg = VERTICAL_PRESETS.get(
+        vertical_name, VERTICAL_PRESETS["Estate & Lettings Agents"]
+    )
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 4, "SYSTEM INTEGRATION HOOK", ln=True)
+
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(2, 132, 199)  # Highlighted blue
+    crms_headline = f"{vert_cfg['primary_hook']} (confirm which)"
+    pdf.cell(0, 5, sanitize_pdf_text(crms_headline), ln=True)
+
+    pdf.set_font("Helvetica", "", 8.5)
+    pdf.set_text_color(51, 65, 85)
+    for bullet in vert_cfg["pitch_bullets"]:
+        pdf.cell(0, 4.5, sanitize_pdf_text(f"- {bullet}"), ln=True)
+
+    pdf.ln(3)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(4)
+
+    # 4. TAILORED OUTREACH EMAIL DRAFT
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_text_color(100, 116, 139)
+    pdf.cell(0, 4, "READY-TO-SEND OUTREACH EMAIL COPY", ln=True)
 
     pdf.set_fill_color(248, 250, 252)
     pdf.set_draw_color(203, 213, 225)
-    pdf.set_font("Courier", "", 8.5)
+    pdf.set_font("Courier", "", 8)
     pdf.set_text_color(15, 23, 42)
 
     clean_pitch = sanitize_pdf_text(pitch_text)
-    pdf.multi_cell(190, 4.5, clean_pitch, border=1, fill=True)
+    pdf.multi_cell(190, 4.2, clean_pitch, border=1, fill=True)
 
-    # Universal bytes extraction across fpdf / fpdf2
     output = pdf.output()
     if isinstance(output, str):
         return output.encode("latin-1", errors="replace")
@@ -890,7 +903,12 @@ with col_right:
             if lead.site_meta_description:
                 st.info(f"**Site Summary:** {lead.site_meta_description}")
 
-            st.markdown("#### Primary Decision Makers (Active Officers)")
+            st.markdown("#### Primary Contacts & Officers")
+            contact_name, contact_role = infer_contact_name_and_role(
+                lead, current_vert_name
+            )
+            st.markdown(f"**Identified Target:** `{contact_name}` ({contact_role})")
+
             if lead.officers:
                 for off in lead.officers:
                     st.markdown(
@@ -934,7 +952,7 @@ with col_right:
             edited_pitch = st.text_area(
                 "Email Body",
                 value=st.session_state["custom_pitch_text"],
-                height=260,
+                height=250,
             )
             st.session_state["custom_pitch_text"] = edited_pitch
 
@@ -957,7 +975,7 @@ with col_right:
                 )
             with d_col2:
                 st.caption(
-                    "Ready to copy and paste for manual review or dispatch."
+                    "Formatted in the standard 1-page lead sheet style."
                 )
 
     else:
