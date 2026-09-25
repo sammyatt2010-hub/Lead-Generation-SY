@@ -3,7 +3,8 @@ import hmac
 import io
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
-from urllib.parse import quote_plus, urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from fpdf import FPDF
@@ -18,8 +19,19 @@ import streamlit as st
 
 
 def check_password() -> bool:
-    if "APP_PASSWORD" not in st.secrets:
-        return True
+    # Fail CLOSED: if the secret is missing or misconfigured, nobody gets in.
+    try:
+        configured_password = st.secrets["APP_PASSWORD"]
+    except Exception:
+        configured_password = None
+    if not configured_password:
+        st.set_page_config(page_title="Configuration Required", layout="centered")
+        st.title("🔒 App Locked")
+        st.error(
+            "APP_PASSWORD is not configured in Streamlit Secrets, so access is"
+            " blocked. Add it under App settings → Secrets."
+        )
+        return False
 
     def login_form():
         with st.form("Credentials"):
@@ -30,7 +42,8 @@ def check_password() -> bool:
 
     def password_entered():
         if hmac.compare_digest(
-            st.session_state["password"], st.secrets["APP_PASSWORD"]
+            st.session_state.get("password", "").encode("utf-8"),
+            str(configured_password).encode("utf-8"),
         ):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
@@ -142,7 +155,8 @@ VERTICAL_PRESETS = {
 
 class OfficerInfo(BaseModel):
     name: str
-    role: str
+    role: str  # Friendly label, e.g. "Director"
+    raw_role: str = ""  # Companies House value, e.g. "llp-designated-member"
     appointed_on: Optional[str] = None
 
 
@@ -157,11 +171,252 @@ class ScrapedLead(BaseModel):
     emails_found: List[str] = Field(default_factory=list)
     officers: List[OfficerInfo] = Field(default_factory=list)
     site_meta_description: Optional[str] = None
+    website_confidence: Optional[str] = None  # High / Medium / Low / Manual
+    website_reasons: List[str] = Field(default_factory=list)
+    discovery_notes: List[str] = Field(default_factory=list)
+    other_emails: List[str] = Field(default_factory=list)  # Third-party addresses (agencies, regulators)
+    pages_checked: List[str] = Field(default_factory=list)
 
 
 # ==========================================
 # 2. ENRICHMENT & SCRAPING ENGINE
 # ==========================================
+
+
+# ------------------------------------------------------------------
+# Web discovery & extraction helpers
+# ------------------------------------------------------------------
+
+LEGAL_SUFFIX_WORDS = {
+    "LTD", "LIMITED", "PLC", "LLP", "LP", "GROUP", "HOLDINGS", "UK", "(UK)",
+    "CO", "COMPANY", "THE", "T/A", "INTERNATIONAL",
+}
+
+# Words too common to identify a firm on their own (kept for the full-name match)
+GENERIC_NAME_WORDS = {
+    "and", "the", "of", "dental", "dentist", "dentists", "practice", "practices",
+    "surgery", "clinic", "clinics", "medical", "health", "healthcare", "care",
+    "solicitors", "solicitor", "law", "legal", "lawyers", "partners", "partnership",
+    "accountants", "accountancy", "accounting", "tax", "bookkeeping", "associates",
+    "estate", "estates", "agents", "agency", "lettings", "letting", "property",
+    "properties", "residential", "sales", "services", "consultants", "consultancy",
+    "management", "uk", "ltd", "limited", "llp", "plc", "group", "holdings", "co",
+}
+
+# Directories, portals, social media, regulators and review sites — never a firm's own site.
+BLOCKED_DOMAINS = {
+    "company-information.service.gov.uk", "gov.uk", "companieshouse.gov.uk",
+    "endole.co.uk", "duedil.com", "opencorporates.com", "companycheck.co.uk",
+    "checkcompany.co.uk", "companiesintheuk.co.uk", "bizdb.co.uk", "companieslist.co.uk",
+    "company-data.co.uk", "ukcompanieslist.com", "find-and-update.company-information.service.gov.uk",
+    "linkedin.com", "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "youtube.com", "tiktok.com", "pinterest.com", "wikipedia.org",
+    "yell.com", "thomsonlocal.com", "scoot.co.uk", "192.com", "cylex-uk.co.uk",
+    "freeindex.co.uk", "hotfrog.co.uk", "yelp.co.uk", "yelp.com", "trustpilot.com",
+    "google.com", "google.co.uk", "bing.com", "duckduckgo.com", "maps.apple.com",
+    "rightmove.co.uk", "zoopla.co.uk", "onthemarket.com", "primelocation.com",
+    "allagents.co.uk", "getagent.co.uk", "homipi.co.uk", "propertymark.co.uk",
+    "whatclinic.com", "doctify.com", "topdoctors.co.uk", "cqc.org.uk", "gdc-uk.org",
+    "lawsociety.org.uk", "solicitors.lawsociety.org.uk", "sra.org.uk",
+    "reviewsolicitors.co.uk", "solicitors.guru", "icaew.com", "accaglobal.com",
+    "checkatrade.com", "ratedpeople.com", "bark.com", "mybuilder.com",
+    "indeed.com", "indeed.co.uk", "glassdoor.co.uk", "reed.co.uk", "totaljobs.com",
+    "zoominfo.com", "rocketreach.co", "apollo.io", "dnb.com", "kompass.com",
+    "crunchbase.com", "bloomberg.com", "misterwhat.co.uk", "brownbook.net",
+    "fyple.co.uk", "opendi.co.uk", "tuugo.co.uk", "infobel.com", "cybo.com",
+    "n49.com", "businessmagnet.co.uk", "streetcheck.co.uk", "amazon.co.uk",
+    "ebay.co.uk", "gumtree.com", "tripadvisor.co.uk", "118118.com", "ukphonebook.com",
+}
+# Blocked only as the exact domain (their subdomains can be real practice sites, e.g. xyzsurgery.nhs.uk)
+BLOCKED_EXACT_ONLY = {"nhs.uk"}
+
+FREE_MAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "hotmail.com", "hotmail.co.uk", "outlook.com",
+    "live.co.uk", "live.com", "yahoo.com", "yahoo.co.uk", "btinternet.com",
+    "btconnect.com", "icloud.com", "me.com", "aol.com", "sky.com", "virginmedia.com",
+    "talktalk.net", "nhs.net",
+}
+
+# Link hints for pages worth scraping, most useful first
+CONTACT_PAGE_HINTS = [
+    "contact", "get-in-touch", "get in touch", "getintouch", "find-us", "find us",
+    "our-team", "our team", "meet-the-team", "meet the team", "team", "our-people",
+    "people", "branches", "offices", "about",
+]
+
+JUNK_EMAIL_MARKERS = (
+    "example.", "sentry", "wixpress", "domain.com", "yourname", "youremail",
+    "email.com", "@2x", "noreply", "no-reply", "donotreply", "u003e", "godaddy",
+    "wordpress", "schema.org", "@sentry", "@ingest", "test@",
+)
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".css", ".js")
+
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}")
+PHONE_TEXT_RE = re.compile(
+    r"(?:\+\s?44\s?(?:\(0\)\s?)?|0044\s?|\(?0)\d[\d \-\(\)]{7,14}\d"
+)
+
+
+def domain_of(url: str) -> Optional[str]:
+    if not url:
+        return None
+    if "://" not in url:
+        url = "https://" + url
+    host = (urlparse(url).hostname or "").lower().strip(".")
+    return host[4:] if host.startswith("www.") else host or None
+
+
+def is_blocked_domain(domain: str) -> bool:
+    domain = domain.lower()
+    if domain in BLOCKED_EXACT_ONLY:
+        return True
+    return any(domain == b or domain.endswith("." + b) for b in BLOCKED_DOMAINS)
+
+
+def domain_label(domain: str) -> str:
+    """'www.hart-new-homes.co.uk' -> 'hartnewhomes'"""
+    parts = domain.lower().split(".")
+    for suffix_len in (3, 2, 1):  # handles .co.uk, .org.uk, .com etc
+        tail = ".".join(parts[-suffix_len:])
+        if tail in {"co.uk", "org.uk", "me.uk", "ltd.uk", "plc.uk", "nhs.uk", "net.uk"} and len(parts) > 2:
+            return re.sub(r"[^a-z0-9]", "", parts[-3])
+    return re.sub(r"[^a-z0-9]", "", parts[-2] if len(parts) >= 2 else parts[0])
+
+
+def distinctive_name_tokens(company_name: str) -> List[str]:
+    """'HART NEW HOMES (WALSALL) LIMITED' -> ['hart', 'new', 'homes', 'walsall']"""
+    words = re.sub(r"[^a-z0-9 ]", " ", company_name.lower().replace("&", " and ")).split()
+    words = [w for w in words if w.upper() not in LEGAL_SUFFIX_WORDS]
+    distinct = [w for w in words if w not in GENERIC_NAME_WORDS]
+    return distinct or words
+
+
+def guess_domains(company_name: str) -> List[str]:
+    """Likely domains straight from the name — a fallback when search engines block us."""
+    words = [w for w in re.sub(r"[^a-z0-9& ]", " ", company_name.lower()).split()
+             if w.upper() not in LEGAL_SUFFIX_WORDS and w != "&"]
+    if not words:
+        return []
+    joined, hyphen = "".join(words), "-".join(words)
+    distinct = [w for w in words if w not in GENERIC_NAME_WORDS]
+    guesses = [f"{joined}.co.uk", f"{joined}.com", f"{hyphen}.co.uk", f"{joined}.uk"]
+    if distinct and distinct != words:
+        short = "".join(distinct)
+        if len(short) >= 5:
+            guesses.append(f"{short}.co.uk")
+    return [g for g in dict.fromkeys(guesses) if len(g) <= 70]
+
+
+def decode_cfemail(hex_string: str) -> Optional[str]:
+    """Decodes Cloudflare's 'email protection' obfuscation."""
+    try:
+        data = bytes.fromhex(hex_string)
+        key = data[0]
+        return "".join(chr(b ^ key) for b in data[1:])
+    except (ValueError, IndexError):
+        return None
+
+
+def clean_email(raw: str) -> Optional[str]:
+    em = unquote(raw or "").strip().strip(".,;:()<>[]'\"").lower()
+    em = em.split("?")[0]
+    m = EMAIL_RE.fullmatch(em)
+    if not m or len(em) > 80:
+        return None
+    if em.endswith(IMAGE_EXTS) or any(j in em for j in JUNK_EMAIL_MARKERS):
+        return None
+    return em
+
+
+def extract_emails(soup: BeautifulSoup, html: str) -> Set[str]:
+    found: Set[str] = set()
+    # 1. mailto: links
+    for a in soup.select('a[href^="mailto:" i]'):
+        em = clean_email(a["href"].split(":", 1)[1])
+        if em:
+            found.add(em)
+    # 2. Cloudflare-protected emails
+    for el in soup.select("[data-cfemail]"):
+        em = clean_email(decode_cfemail(el.get("data-cfemail", "")) or "")
+        if em:
+            found.add(em)
+    for a in soup.select('a[href*="/cdn-cgi/l/email-protection#"]'):
+        em = clean_email(decode_cfemail(a["href"].split("#", 1)[1]) or "")
+        if em:
+            found.add(em)
+    # 3. Visible text, including "name [at] firm [dot] co.uk" style
+    text = soup.get_text(" ")
+    text = re.sub(r"\s*[\[\(\{]\s*at\s*[\]\)\}]\s*", "@", text, flags=re.I)
+    text = re.sub(r"\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*", ".", text, flags=re.I)
+    # 4. Structured data (JSON-LD "email": "...")
+    for script in soup.find_all("script", type="application/ld+json"):
+        text += " " + (script.string or "")
+    for raw in EMAIL_RE.findall(text):
+        em = clean_email(raw)
+        if em:
+            found.add(em)
+    return found
+
+
+def normalise_uk_phone(raw: str) -> Optional[str]:
+    """Any UK format -> standard display format, e.g. '+44 (0)1922 123456' -> '01922 123456'."""
+    if not raw:
+        return None
+    raw = unquote(raw).replace("(0)", "")
+    digits = re.sub(r"\D", "", raw)
+    if digits.startswith("0044"):
+        digits = "0" + digits[4:]
+    elif digits.startswith("44") and len(digits) == 12:
+        digits = "0" + digits[2:]
+    if not digits.startswith("0") or len(digits) not in (10, 11) or digits[1] not in "123578":
+        return None
+    d = digits
+    if len(d) == 10:
+        return f"{d[:5]} {d[5:]}"
+    if d.startswith("02"):
+        return f"{d[:3]} {d[3:7]} {d[7:]}"            # 020 7946 0000
+    if d.startswith(("03", "08")):
+        return f"{d[:4]} {d[4:7]} {d[7:]}"            # 0800 123 4567
+    if d.startswith("07"):
+        return f"{d[:5]} {d[5:]}"                     # 07700 900123
+    if d[2] == "1" or d[3] == "1":
+        return f"{d[:4]} {d[4:7]} {d[7:]}"            # 0121 234 5678
+    return f"{d[:5]} {d[5:]}"                         # 01922 123456
+
+
+def extract_phones(soup: BeautifulSoup, html: str) -> List[Tuple[str, int]]:
+    """Returns (phone, weight). Clickable tel: links count more than plain text."""
+    out: List[Tuple[str, int]] = []
+    for a in soup.select('a[href^="tel:" i], a[href^="callto:" i]'):
+        ph = normalise_uk_phone(a["href"].split(":", 1)[1])
+        if ph:
+            out.append((ph, 3))
+    for script in soup(["script", "style", "noscript"]):
+        script.decompose()
+    for raw in PHONE_TEXT_RE.findall(soup.get_text(" ")):
+        ph = normalise_uk_phone(raw)
+        if ph:
+            out.append((ph, 1))
+    return out
+
+
+def _describe_ch_error(resp: requests.Response) -> str:
+    """Turns a Companies House HTTP error into a plain-English message."""
+    code = resp.status_code
+    if code == 401:
+        return "Companies House rejected the API key (401). Check COMPANIES_HOUSE_KEY in Secrets."
+    if code == 403:
+        return "Companies House refused access (403). The key may not be a REST API key."
+    if code == 404:
+        return "No matching companies found (404)."
+    if code == 416:
+        return "Too many results requested. Narrow the search and try again."
+    if code == 429:
+        return "Companies House rate limit hit (600 requests / 5 mins). Wait a few minutes and retry."
+    if code >= 500:
+        return f"Companies House is having problems right now ({code}). Try again shortly."
+    return f"Companies House returned an unexpected error ({code})."
+
 
 
 class LeadEnricher:
@@ -174,8 +429,12 @@ class LeadEnricher:
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                 " (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-GB,en;q=0.9",
         }
+        self.session = requests.Session()
+        self.session.headers.update(self.web_headers)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         if not self.ch_api_key:
@@ -191,9 +450,10 @@ class LeadEnricher:
         location_keyword: Optional[str] = None,
         company_name_includes: Optional[str] = None,
         limit: int = 25,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Returns (results, error_message). error_message is None on success."""
         if not self.ch_api_key:
-            return []
+            return [], "No Companies House API key configured."
 
         url = f"{self.base_url}/advanced-search/companies"
         params: Dict[str, Any] = {
@@ -231,12 +491,23 @@ class LeadEnricher:
                             ),
                             "Town / Postcode": location_str or "UK",
                             "Status": item.get("company_status", "").title(),
+                            "Companies House": (
+                                "https://find-and-update.company-information.service.gov.uk/company/"
+                                + item.get("company_number", "")
+                            ),
                         }
                     )
-                return results
-        except Exception:
-            pass
-        return []
+                return results, None
+            if resp.status_code == 404:
+                # Advanced search answers 404 when nothing matches.
+                return [], None
+            return [], _describe_ch_error(resp)
+        except requests.exceptions.Timeout:
+            return [], "Companies House didn't respond in time. Please try again."
+        except requests.exceptions.RequestException as exc:
+            return [], f"Couldn't reach Companies House ({exc.__class__.__name__})."
+        except ValueError:
+            return [], "Companies House returned an unreadable response."
 
     def get_company_details(self, company_number: str) -> Dict[str, Any]:
         if not self.ch_api_key:
@@ -265,12 +536,12 @@ class LeadEnricher:
             if resp.status_code == 200:
                 for item in resp.json().get("items", []):
                     if not item.get("resigned_on"):
+                        raw_role = (item.get("officer_role") or "").lower()
                         officers.append(
                             OfficerInfo(
                                 name=item.get("name", "Unknown"),
-                                role=item.get(
-                                    "officer_role", "Director"
-                                ).title(),
+                                role=format_role(raw_role),
+                                raw_role=raw_role,
                                 appointed_on=item.get("appointed_on"),
                             )
                         )
@@ -278,147 +549,286 @@ class LeadEnricher:
             pass
         return officers
 
-    def auto_discover_website(
-        self, company_name: str, location: Optional[str] = None
-    ) -> Optional[str]:
-        clean_name = re.sub(
-            r"\b(LTD|LIMITED|PLC|LLP|GROUP|UK)\b",
-            "",
-            company_name,
-            flags=re.IGNORECASE,
-        ).strip()
-        query = f"{clean_name} {location or ''} official website UK"
+    # ------------------------------------------------------------------
+    # WEBSITE DISCOVERY (search results + domain guesses, verified & scored)
+    # ------------------------------------------------------------------
 
-        search_url = (
-            f"https://html.duckduckgo.com/html/?q={quote_plus(query.strip())}"
-        )
+    def _fetch_html(self, url: str, timeout: int = 7) -> Optional[Tuple[str, str]]:
+        """GETs a page. Returns (final_url_after_redirects, html) or None."""
         try:
-            resp = requests.get(
-                search_url, headers=self.web_headers, timeout=6
-            )
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                links = soup.select(".result__url")
-                blocked = [
-                    "find-and-update.company-information.service.gov.uk",
-                    "companieshouse",
-                    "endole",
-                    "duedil",
-                    "linkedin",
-                    "facebook",
-                    "yell.com",
-                    "checkcompany",
-                ]
-
-                for link in links:
-                    raw_text = link.get_text().strip()
-                    domain = raw_text.split("/")[0].strip()
-                    if domain and not any(b in domain.lower() for b in blocked):
-                        return f"https://{domain}"
-        except Exception:
+            resp = self.session.get(url, timeout=timeout, allow_redirects=True)
+            ctype = resp.headers.get("Content-Type", "").lower()
+            if resp.status_code == 200 and ("html" in ctype or not ctype):
+                return resp.url, resp.text
+        except requests.exceptions.RequestException:
             pass
         return None
 
+    def _search_duckduckgo(self, query: str) -> Tuple[List[str], Optional[str]]:
+        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        try:
+            resp = self.session.get(url, timeout=7)
+        except requests.exceptions.RequestException:
+            return [], "DuckDuckGo unreachable"
+        if resp.status_code != 200 or "anomaly" in resp.text.lower()[:5000]:
+            return [], "DuckDuckGo blocked the request"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        urls: List[str] = []
+        for a in soup.select("a.result__a[href]"):
+            href = a["href"]
+            if "uddg=" in href:
+                href = unquote(parse_qs(urlparse(href).query).get("uddg", [""])[0])
+            if href.startswith("//"):
+                href = "https:" + href
+            urls.append(href)
+        if not urls:  # Older markup: display URL only
+            for span in soup.select(".result__url"):
+                urls.append("https://" + span.get_text().strip())
+        return urls, None
+
+    def _search_bing(self, query: str) -> Tuple[List[str], Optional[str]]:
+        url = f"https://www.bing.com/search?q={quote_plus(query)}&setlang=en-GB&cc=GB"
+        try:
+            resp = self.session.get(url, timeout=7)
+        except requests.exceptions.RequestException:
+            return [], "Bing unreachable"
+        if resp.status_code != 200:
+            return [], "Bing blocked the request"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        urls: List[str] = []
+        for a in soup.select("li.b_algo h2 a[href]"):
+            href = a["href"]
+            if "bing.com/ck/a" in href:  # Bing tracking wrapper: u=a1<base64url>
+                u = parse_qs(urlparse(href).query).get("u", [""])[0]
+                if u.startswith("a1"):
+                    try:
+                        b64 = u[2:] + "=" * (-len(u[2:]) % 4)
+                        href = base64.urlsafe_b64decode(b64).decode("utf-8", "ignore")
+                    except Exception:
+                        continue
+            urls.append(href)
+        return urls, None
+
+    def _score_candidate(
+        self, domain: str, html: str, company_name: str,
+        company_number: Optional[str], postcode: Optional[str], town: Optional[str],
+    ) -> Tuple[int, List[str]]:
+        """Scores how likely a site belongs to this company. Returns (score, reasons)."""
+        score, reasons = 0, []
+        tokens = distinctive_name_tokens(company_name)
+        compact = "".join(tokens)
+        label = domain_label(domain)
+
+        # 1. Domain vs company name
+        if compact and len(compact) >= 4 and (compact in label or (len(label) >= 5 and label in compact)):
+            score += 45
+            reasons.append("domain matches company name")
+        else:
+            hits = [t for t in tokens if len(t) >= 3 and t in label]
+            if hits:
+                score += min(15 * len(hits), 30)
+                reasons.append(f"domain contains '{', '.join(hits)}'")
+
+        soup = BeautifulSoup(html, "html.parser")
+        title = (soup.title.get_text(" ", strip=True) if soup.title else "").lower()
+        og = soup.find("meta", attrs={"property": "og:site_name"})
+        if og and og.get("content"):
+            title += " " + og["content"].lower()
+        text = soup.get_text(" ", strip=True)
+        text_l = text.lower()
+        text_compact = re.sub(r"\s+", "", text_l)
+
+        # 2. Page title / site name
+        title_hits = [t for t in tokens if len(t) >= 3 and t in title]
+        if title_hits:
+            score += min(10 * len(title_hits), 20)
+            reasons.append("name in page title")
+
+        # 3. UK companies must show their registered number on their website
+        if company_number:
+            num = company_number.lstrip("0")
+            if re.search(rf"(?<!\d)0*{re.escape(num)}(?!\d)", text_compact) and len(num) >= 5:
+                score += 50
+                reasons.append(f"company number {company_number} shown on site")
+
+        # 4. Legal name / location on page
+        legal = re.sub(r"\s+", " ", company_name.lower()).strip()
+        if legal and legal in text_l:
+            score += 20
+            reasons.append("full legal name on site")
+        if postcode and postcode.replace(" ", "").lower() in text_compact:
+            score += 15
+            reasons.append(f"registered postcode {postcode} on site")
+        elif town and len(town) > 3 and town.lower() in text_l:
+            score += 5
+            reasons.append(f"mentions {town}")
+        return score, reasons
+
+    def auto_discover_website(
+        self,
+        company_name: str,
+        location: Optional[str] = None,
+        company_number: Optional[str] = None,
+        postcode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Finds the firm's own website. Returns url, confidence, reasons and notes."""
+        notes: List[str] = []
+        clean_name = " ".join(w for w in re.sub(r"[^\w&' ]", " ", company_name).split()
+                              if w.upper() not in LEGAL_SUFFIX_WORDS)
+        query = f"{clean_name} {location or ''}".strip()
+
+        # A. Search engines (DuckDuckGo, then Bing as a fallback)
+        search_urls: List[str] = []
+        for engine in (self._search_duckduckgo, self._search_bing):
+            urls, err = engine(query)
+            if err:
+                notes.append(err)
+            search_urls.extend(urls)
+            if urls:
+                break
+
+        candidates: List[str] = []
+        for u in search_urls:
+            d = domain_of(u)
+            if d and not is_blocked_domain(d) and d not in candidates:
+                candidates.append(d)
+        candidates = candidates[:6]
+
+        # B. Domain guesses (works even when search engines block us)
+        for guess in guess_domains(company_name):
+            if guess not in candidates:
+                candidates.append(guess)
+
+        # C. Fetch & score candidates in parallel
+        def check(domain: str):
+            page = self._fetch_html(f"https://{domain}") or self._fetch_html(f"http://{domain}")
+            if not page:
+                return None
+            final_url, html = page
+            final_domain = domain_of(final_url) or domain
+            if is_blocked_domain(final_domain):
+                return None
+            score, reasons = self._score_candidate(
+                final_domain, html, company_name, company_number, postcode, location
+            )
+            return final_url, final_domain, score, reasons
+
+        results = []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for res in pool.map(check, candidates):
+                if res:
+                    results.append(res)
+
+        if not results:
+            notes.append("No candidate website responded")
+            return {"url": None, "confidence": None, "reasons": [], "notes": notes}
+
+        results.sort(key=lambda r: r[2], reverse=True)
+        final_url, final_domain, score, reasons = results[0]
+        if score < 35:
+            notes.append(f"Best candidate {final_domain} scored too low to trust")
+            return {"url": None, "confidence": None, "reasons": reasons, "notes": notes,
+                    "rejected": final_domain}
+
+        confidence = "High" if score >= 80 else "Medium" if score >= 55 else "Low"
+        parsed = urlparse(final_url)
+        return {
+            "url": f"{parsed.scheme}://{parsed.netloc}",
+            "confidence": confidence,
+            "reasons": reasons,
+            "notes": notes,
+        }
+
+    # ------------------------------------------------------------------
+    # CONTACT SCRAPING (contact/about/team pages, hidden emails, clean phones)
+    # ------------------------------------------------------------------
+
+    def _find_contact_pages(self, soup: BeautifulSoup, root: str) -> List[str]:
+        root_host = domain_of(root)
+        ranked: List[Tuple[int, str]] = []
+        for a in soup.find_all("a", href=True):
+            href = urljoin(root + "/", a["href"].strip())
+            if not href.startswith("http") or domain_of(href) != root_host:
+                continue
+            path_and_text = (urlparse(href).path + " " + a.get_text(" ", strip=True)).lower()
+            for rank, hint in enumerate(CONTACT_PAGE_HINTS):
+                if hint in path_and_text:
+                    clean = href.split("#")[0].rstrip("/")
+                    if clean != root.rstrip("/"):
+                        ranked.append((rank, clean))
+                    break
+        seen, pages = set(), []
+        for _, url in sorted(ranked):
+            if url not in seen:
+                seen.add(url)
+                pages.append(url)
+        return pages[:4]
+
     def scrape_contact_channels(self, base_url: str) -> Dict[str, Any]:
-        emails: Set[str] = set()
-        phones: Set[str] = set()
-        description = ""
-
+        empty = {"emails": [], "other_emails": [], "phones": [], "description": "",
+                 "resolved_url": None, "pages_checked": []}
         if not base_url:
-            return {
-                "emails": [],
-                "phones": [],
-                "description": "",
-                "resolved_url": None,
-            }
-
+            return empty
         if not base_url.startswith("http"):
             base_url = f"https://{base_url}"
 
-        parsed = urlparse(base_url)
+        home = self._fetch_html(base_url)
+        if not home and base_url.startswith("https://"):
+            home = self._fetch_html("http://" + base_url[len("https://"):])
+        if not home:
+            return {**empty, "resolved_url": base_url}
+
+        final_url, home_html = home
+        parsed = urlparse(final_url)
         root = f"{parsed.scheme}://{parsed.netloc}"
+        site_domain = domain_of(root)
+        home_soup = BeautifulSoup(home_html, "html.parser")
 
-        pages_to_check = [
-            root,
-            urljoin(root, "/contact"),
-            urljoin(root, "/contact-us"),
-            urljoin(root, "/about"),
-        ]
+        extra_pages = self._find_contact_pages(home_soup, root)
+        if not extra_pages:
+            extra_pages = [urljoin(root, p) for p in ("/contact", "/contact-us", "/about", "/about-us")]
 
-        for url in pages_to_check:
-            try:
-                resp = requests.get(url, headers=self.web_headers, timeout=6)
-                if resp.status_code != 200:
-                    continue
+        pages_html = [(final_url, home_html)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for url, page in zip(extra_pages, pool.map(self._fetch_html, extra_pages)):
+                if page:
+                    pages_html.append((page[0], page[1]))
 
-                soup = BeautifulSoup(resp.text, "html.parser")
+        email_hits: Dict[str, int] = {}
+        phone_scores: Dict[str, int] = {}
+        description = ""
 
-                if not description:
-                    meta_tag = soup.find("meta", attrs={"name": "description"})
-                    if meta_tag and meta_tag.get("content"):
-                        description = meta_tag["content"].strip()
+        for _, html in pages_html:
+            soup = BeautifulSoup(html, "html.parser")
+            if not description:
+                for attrs in ({"name": "description"}, {"property": "og:description"}):
+                    tag = soup.find("meta", attrs=attrs)
+                    if tag and tag.get("content"):
+                        description = tag["content"].strip()
+                        break
+            for em in extract_emails(soup, html):
+                email_hits[em] = email_hits.get(em, 0) + 1
+            for ph, weight in extract_phones(soup, html):
+                phone_scores[ph] = phone_scores.get(ph, 0) + weight
 
-                for mailto in soup.select('a[href^="mailto:"]'):
-                    em = (
-                        mailto["href"]
-                        .replace("mailto:", "")
-                        .split("?")[0]
-                        .strip()
-                        .lower()
-                    )
-                    if em and "@" in em and "." in em:
-                        if not any(
-                            ext in em
-                            for ext in [
-                                ".png",
-                                ".jpg",
-                                ".webp",
-                                "sentry",
-                                "wixpress",
-                            ]
-                        ):
-                            emails.add(em)
+        own, freemail, other = [], [], []
+        for em in email_hits:
+            dom = em.split("@", 1)[1]
+            if dom == site_domain or dom.endswith("." + site_domain) or site_domain.endswith("." + dom):
+                own.append(em)
+            elif dom in FREE_MAIL_DOMAINS:
+                freemail.append(em)
+            else:
+                other.append(em)
 
-                for tel in soup.select('a[href^="tel:"]'):
-                    ph = tel["href"].replace("tel:", "").strip()
-                    if len(ph) >= 9:
-                        phones.add(ph)
-
-                page_text = soup.get_text()
-                text_emails = re.findall(
-                    r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
-                    page_text,
-                )
-                for te in text_emails:
-                    te_clean = te.strip().lower()
-                    if not any(
-                        ext in te_clean
-                        for ext in [
-                            ".png",
-                            ".jpg",
-                            ".webp",
-                            "wixpress",
-                            "sentry",
-                        ]
-                    ):
-                        emails.add(te_clean)
-
-                uk_phones = re.findall(
-                    r"(?:(?:\+44\s?\(0\)\s?|\+44\s?|0)[1-9]\d{2,4}\s?\d{3,4}\s?\d{3,4})",
-                    page_text,
-                )
-                for p in uk_phones[:4]:
-                    cleaned = p.strip()
-                    if len(cleaned) >= 10:
-                        phones.add(cleaned)
-            except Exception:
-                continue
-
+        phones = sorted(phone_scores, key=lambda p: (-phone_scores[p], p))[:5]
         return {
-            "emails": sorted(list(emails)),
-            "phones": sorted(list(phones)),
+            "emails": sorted(own) + sorted(freemail),
+            "other_emails": sorted(other),
+            "phones": phones,
             "description": description,
             "resolved_url": root,
+            "pages_checked": [u for u, _ in pages_html],
         }
 
     def enrich_selected_company(
@@ -445,28 +855,31 @@ class LeadEnricher:
         registered_address = (
             ", ".join(address_parts) if address_parts else None
         )
-        town_or_postcode = address_dict.get("locality") or address_dict.get(
-            "postal_code"
-        )
+        town = address_dict.get("locality")
+        postcode = address_dict.get("postal_code")
 
         officers = self.get_officers(company_number)
 
         target_website = manual_website.strip() if manual_website else None
+        discovery: Dict[str, Any] = {"confidence": "Manual", "reasons": ["entered by you"], "notes": []}
         if not target_website:
-            target_website = self.auto_discover_website(
-                company_name, location=town_or_postcode
+            discovery = self.auto_discover_website(
+                company_name,
+                location=town or postcode,
+                company_number=company_number,
+                postcode=postcode,
             )
+            target_website = discovery.get("url")
 
         site_contacts = (
             self.scrape_contact_channels(target_website)
             if target_website
-            else {
-                "emails": [],
-                "phones": [],
-                "description": "",
-                "resolved_url": None,
-            }
+            else {"emails": [], "other_emails": [], "phones": [], "description": "",
+                  "resolved_url": None, "pages_checked": []}
         )
+        notes = list(discovery.get("notes", []))
+        if target_website and not site_contacts.get("pages_checked"):
+            notes.append("Website didn't respond when scraping contacts")
 
         return ScrapedLead(
             company_name=company_name,
@@ -479,6 +892,11 @@ class LeadEnricher:
             emails_found=site_contacts["emails"],
             officers=officers,
             site_meta_description=site_contacts["description"],
+            website_confidence=discovery.get("confidence") if target_website else None,
+            website_reasons=discovery.get("reasons", []),
+            discovery_notes=notes,
+            other_emails=site_contacts.get("other_emails", []),
+            pages_checked=site_contacts.get("pages_checked", []),
         )
 
 
@@ -514,6 +932,116 @@ def sanitize_pdf_text(text: str) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+# Companies House officer_role values, best decision-maker first.
+# Secretaries and all "corporate-*" roles (companies, not people) are excluded.
+DECISION_MAKER_ROLES = [
+    "director",
+    "llp-designated-member",
+    "llp-member",
+    "managing-officer",
+    "member",
+]
+
+ROLE_LABELS = {
+    "director": "Director",
+    "llp-designated-member": "Designated Member (LLP)",
+    "llp-member": "Member (LLP)",
+    "managing-officer": "Managing Officer",
+    "member": "Member",
+    "secretary": "Company Secretary",
+    "nominee-director": "Nominee Director",
+}
+
+NAME_TITLES = {"mr", "mrs", "ms", "miss", "dr", "sir", "dame", "prof", "professor", "lord", "lady", "rev"}
+
+
+def format_role(raw_role: str) -> str:
+    raw_role = (raw_role or "").strip().lower()
+    return ROLE_LABELS.get(raw_role, raw_role.replace("-", " ").title() or "Officer")
+
+
+def first_name_from_officer(raw_name: str) -> Optional[str]:
+    """Companies House lists people as 'SURNAME, Forename Middle'.
+    Returns the forename, e.g. 'BYWATER, Paul James' -> 'Paul'."""
+    if not raw_name:
+        return None
+    if "," in raw_name:
+        forenames = raw_name.split(",", 1)[1]
+    else:
+        forenames = raw_name  # Rare 'Paul BYWATER' style: first word is the forename
+    for token in forenames.replace(".", " ").split():
+        clean = re.sub(r"[^A-Za-z'\-]", "", token)
+        if clean and clean.lower() not in NAME_TITLES and len(clean) > 1:
+            return "-".join(p[:1].upper() + p[1:].lower() for p in clean.split("-"))
+    return None
+
+
+def pick_decision_maker(officers: List["OfficerInfo"]) -> Optional["OfficerInfo"]:
+    """Chooses the most senior active person (directors first, longest-serving first)."""
+    for wanted in DECISION_MAKER_ROLES:
+        matches = [o for o in officers if o.raw_role == wanted]
+        if matches:
+            return sorted(matches, key=lambda o: o.appointed_on or "9999")[0]
+    return None
+
+
+GENERIC_EMAIL_PREFIXES = {
+    "info", "information", "enquiries", "enquiry", "enq", "sales", "lettings", "letting",
+    "rentals", "lets", "office", "admin", "administration", "contact", "contactus",
+    "mail", "post", "reception", "frontdesk", "support", "help", "hello", "hi", "team",
+    "accounts", "account", "finance", "billing", "invoices", "payments", "bookings",
+    "booking", "appointments", "appts", "careers", "jobs", "recruitment", "hr",
+    "marketing", "newsletter", "news", "press", "media", "privacy", "dpo", "data",
+    "gdpr", "complaints", "feedback", "service", "services", "customerservice",
+    "customerservices", "general", "manager", "management", "partners", "property",
+    "properties", "valuations", "valuation", "maintenance", "repairs", "lettingsteam",
+    "salesteam", "dental", "dentist", "surgery", "practice", "practicemanager",
+    "clinic", "patients", "patient", "law", "legal", "conveyancing", "probate",
+    "family", "tax", "payroll", "bookkeeping", "audit", "web", "webmaster", "website",
+    "it", "tech", "office1", "branch", "new", "newbusiness", "referrals", "clients",
+}
+
+
+def first_name_from_email(email: str) -> Optional[str]:
+    """'david.mann@x.co.uk' -> 'David'. Returns None for inboxes like info@ or accounts@."""
+    prefix = email.split("@", 1)[0].lower()
+    compact = re.sub(r"[^a-z]", "", prefix)
+    if not compact or compact in GENERIC_EMAIL_PREFIXES:
+        return None
+    first = re.split(r"[._\-]", prefix)[0]
+    first = re.sub(r"[^a-z]", "", first)
+    # Must look like a first name: letters only, 3-12 chars, not a generic word
+    if 3 <= len(first) <= 12 and first not in GENERIC_EMAIL_PREFIXES and first.isalpha():
+        # 'dmann' style (initial + surname) can't be trusted as a first name
+        has_separator = any(sep in prefix for sep in "._-")
+        if not has_separator:
+            if len(first) > 8:
+                return None
+            # Two leading consonants that rarely start a first name = initial + surname ('dmann', 'pbywater')
+            vowels = set("aeiouy")
+            ok_clusters = {"br", "ch", "cl", "cr", "dr", "fl", "fr", "gl", "gr", "kr",
+                           "ph", "pr", "sc", "sh", "st", "th", "tr", "bl", "chr", "sk"}
+            if first[0] not in vowels and first[1] not in vowels and first[:2] not in ok_clusters:
+                return None
+        return first.capitalize()
+    return None
+
+
+def pick_primary_email(lead: "ScrapedLead", first_name: Optional[str] = None) -> Optional[str]:
+    """The best single email for the dossier: the contact's own inbox, else the main inbox."""
+    if not lead.emails_found:
+        return None
+    if first_name:
+        for em in lead.emails_found:
+            if em.split("@", 1)[0].lower().startswith(first_name.lower()):
+                return em
+    for preferred in ("info", "enquiries", "hello", "contact", "office", "reception"):
+        for em in lead.emails_found:
+            if em.split("@", 1)[0].lower() == preferred:
+                return em
+    return lead.emails_found[0]
+
+
 def infer_contact_name_and_role(
     lead: ScrapedLead, vertical_key: str
 ) -> Tuple[str, str]:
@@ -522,44 +1050,18 @@ def infer_contact_name_and_role(
         vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
     )
 
-    # 1. Primary Officer match
-    if lead.officers:
-        top_officer = lead.officers[0]
-        # Clean standard UK Companies House officer formats (e.g. "BYWATER, Paul" or "Paul BYWATER")
-        raw_name = top_officer.name.replace(",", " ")
-        parts = [p.capitalize() for p in raw_name.split() if p.isalpha()]
-        if parts:
-            first_name = parts[0]
-            role = top_officer.role
-            return first_name, role
+    # 1. Primary Officer match — only real people in decision-making roles
+    officer = pick_decision_maker(lead.officers)
+    if officer:
+        first_name = first_name_from_officer(officer.name)
+        if first_name:
+            return first_name, officer.role
 
-    # 2. Email Prefix Extraction (e.g. sarah@hartnewhomes.co.uk -> Sarah)
-    generic_prefixes = {
-        "info",
-        "enquiries",
-        "sales",
-        "lettings",
-        "office",
-        "admin",
-        "contact",
-        "mail",
-        "reception",
-        "support",
-        "help",
-        "hello",
-    }
-    if lead.emails_found:
-        for em in lead.emails_found:
-            prefix = em.split("@")[0].lower()
-            # check if it looks like a person's name (e.g. sarah, david.mann, p.bywater)
-            prefix_clean = re.sub(r"[0-9]", "", prefix)
-            if prefix_clean and prefix_clean not in generic_prefixes:
-                name_candidate = prefix_clean.split(".")[0].capitalize()
-                if len(name_candidate) >= 3:
-                    return (
-                        name_candidate,
-                        f"Direct Contact ({em})",
-                    )
+    # 2. Email Prefix Extraction (e.g. sarah@firm.co.uk or david.mann@firm.co.uk -> Sarah / David)
+    for em in lead.emails_found:
+        name_candidate = first_name_from_email(em)
+        if name_candidate:
+            return name_candidate, f"Direct Contact ({em})"
 
     # 3. Fallback to vertical-specific role
     return vert_cfg["fallback_greeting"], "Team / Branch Management"
@@ -645,7 +1147,7 @@ def create_pdf_dossier(
 
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(71, 85, 105)
-    primary_email = lead.emails_found[0] if lead.emails_found else "Email TBD"
+    primary_email = pick_primary_email(lead, contact_name) or "Email TBD"
     primary_phone = (
         lead.phones_found[0] if lead.phones_found else "Phone TBD"
     )
@@ -737,6 +1239,35 @@ def create_pdf_dossier(
 # 4. STREAMLIT APPLICATION
 # ==========================================
 
+def render_leads_table(df: pd.DataFrame, key: str):
+    """Selectable company table with tidy columns. Works on old and new Streamlit versions."""
+    column_config = {
+        "Company Name": st.column_config.TextColumn("Company Name", width="large"),
+        "Company Number": st.column_config.TextColumn("Company #", width="small"),
+        "Incorporated": st.column_config.DateColumn("Incorporated", format="DD MMM YYYY", width="small"),
+        "Town / Postcode": st.column_config.TextColumn("Town / Postcode", width="medium"),
+        "Companies House": st.column_config.LinkColumn(
+            "Registry", display_text="View ↗", width="small",
+            help="Opens the company's Companies House page in a new tab",
+        ),
+    }
+    column_order = [c for c in column_config if c in df.columns]
+    table_height = min(38 + 35 * len(df), 420)  # Grows with rows, scrolls after ~11
+    common = dict(
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        column_config=column_config,
+        column_order=column_order,
+        height=table_height,
+        key=key,
+    )
+    try:
+        return st.dataframe(df, width="stretch", **common)  # Streamlit 1.46+
+    except Exception:
+        return st.dataframe(df, use_container_width=True, **common)  # Older Streamlit
+
+
 st.set_page_config(
     page_title="Prospect Discovery & Dossier Engine", layout="wide"
 )
@@ -747,16 +1278,26 @@ st.caption(
     " sector-tailored pitches and PDF briefings."
 )
 
-default_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
+try:
+    secret_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
+except Exception:
+    secret_ch_key = ""
 
 with st.sidebar:
     st.header("Settings")
-    ch_api_key = st.text_input(
-        "Companies House API Key",
-        value=default_ch_key,
-        type="password",
-        help="developer.company-information.service.gov.uk",
-    )
+    if secret_ch_key:
+        # Key stays server-side: never placed in a widget, so never sent to the browser.
+        ch_api_key = secret_ch_key
+        st.success("Companies House API key loaded from Secrets.")
+    else:
+        ch_api_key = st.text_input(
+            "Companies House API Key",
+            type="password",
+            help=(
+                "Not found in Secrets. Paste a key for this session, or add"
+                " COMPANIES_HOUSE_KEY to Streamlit Secrets."
+            ),
+        )
     if st.button("Log Out"):
         st.session_state["password_correct"] = False
         st.rerun()
@@ -792,7 +1333,14 @@ with col_left:
             placeholder=f"e.g. {vertical_config['search_hint']}",
         )
 
-    browse_btn = st.button("🔍 Feed Companies from Registry", type="primary")
+    r_col1, r_col2 = st.columns([1, 2])
+    with r_col1:
+        result_limit = st.selectbox("Results to fetch", [25, 50, 100], index=0)
+    with r_col2:
+        st.write("")
+        st.write("")
+        browse_btn = st.button("🔍 Feed Companies from Registry", type="primary")
+    target_row = None
 
     if browse_btn:
         if not ch_api_key:
@@ -800,47 +1348,56 @@ with col_left:
         else:
             with st.spinner("Fetching active companies from registry..."):
                 enricher = LeadEnricher(ch_api_key=ch_api_key)
-                leads_list = enricher.browse_vertical(
+                leads_list, search_error = enricher.browse_vertical(
                     sic_codes=vertical_config["sic_codes"],
                     location_keyword=location_input,
                     company_name_includes=keyword_filter,
-                    limit=25,
+                    limit=result_limit,
                 )
-                st.session_state["discovered_leads"] = leads_list
-                st.session_state["active_vertical_name"] = selected_vertical_name
-                st.session_state["selected_lead_row"] = None
+            st.session_state["discovered_leads"] = leads_list
+            st.session_state["active_vertical_name"] = selected_vertical_name
+            st.session_state["selected_lead_row"] = None
+            # New search = new table widget, so no stale row selection carries over.
+            st.session_state["search_version"] = st.session_state.get("search_version", 0) + 1
+            if search_error:
+                st.error(search_error)
+            elif not leads_list:
+                st.warning(
+                    "No active companies matched. Try a broader location"
+                    " (e.g. county instead of town) or remove the name keyword."
+                )
 
     if st.session_state.get("discovered_leads"):
         st.write("---")
         st.subheader("Step 2: Select Target Firm")
+        leads_data = st.session_state["discovered_leads"]
         st.caption(
-            "👉 Click anywhere on a company row below to select it for"
-            " enrichment."
+            f"{len(leads_data)} active {'company' if len(leads_data) == 1 else 'companies'} found. 👉 Tick the box at the"
+            " left of a row to select it (click a column header to sort)."
         )
 
-        leads_data = st.session_state["discovered_leads"]
         df = pd.DataFrame(leads_data)
+        if "Incorporated" in df.columns:
+            df["Incorporated"] = pd.to_datetime(df["Incorporated"], errors="coerce")
 
-        table_event = st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            selection_mode="single-row",
-            on_select="rerun",
+        table_event = render_leads_table(
+            df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
         )
 
         selected_rows = table_event.selection.rows if table_event else []
 
-        if selected_rows:
+        if selected_rows and selected_rows[0] < len(leads_data):
             st.session_state["selected_lead_row"] = leads_data[selected_rows[0]]
-        elif (
-            "selected_lead_row" not in st.session_state
-            or not st.session_state["selected_lead_row"]
-        ):
-            st.session_state["selected_lead_row"] = leads_data[0]
+        else:
+            # Nothing ticked = nothing selected. Never fall back to row 1.
+            st.session_state["selected_lead_row"] = None
 
         target_row = st.session_state["selected_lead_row"]
 
+    if st.session_state.get("discovered_leads") and not target_row:
+        st.info("☝️ Tick a company in the table above to continue.")
+
+    if st.session_state.get("discovered_leads") and target_row:
         st.markdown(
             f"**Selected Target:** `{target_row['Company Name']}`"
             f" *(#{target_row['Company Number']} —"
@@ -898,7 +1455,28 @@ with col_right:
             )
 
             if lead.website_url:
-                st.markdown(f"🌐 **Website:** [{lead.website_url}]({lead.website_url})")
+                badge = {"High": "🟢 High", "Medium": "🟡 Medium", "Low": "🟠 Low",
+                         "Manual": "✍️ Entered manually"}.get(lead.website_confidence or "", "")
+                st.markdown(
+                    f"🌐 **Website:** [{lead.website_url}]({lead.website_url})"
+                    + (f" — match confidence: **{badge}**" if badge else "")
+                )
+                if lead.website_reasons:
+                    st.caption("Why: " + "; ".join(lead.website_reasons))
+                if lead.website_confidence == "Low":
+                    st.warning(
+                        "This website is a weak match. Check it's the right firm before"
+                        " sending, or paste the correct URL on the left and re-run."
+                    )
+            else:
+                st.warning(
+                    "🌐 Couldn't confidently find this firm's website. Paste it into"
+                    " the Website URL box on the left and re-run to pull contacts."
+                )
+            if lead.discovery_notes:
+                with st.expander("Discovery notes"):
+                    for note in lead.discovery_notes:
+                        st.markdown(f"- {note}")
 
             if lead.site_meta_description:
                 st.info(f"**Site Summary:** {lead.site_meta_description}")
@@ -931,6 +1509,17 @@ with col_right:
             )
             st.markdown(f"**Emails:** {emails_display}")
             st.markdown(f"**Phones:** {phones_display}")
+            if lead.other_emails or lead.pages_checked:
+                with st.expander("Scrape details"):
+                    if lead.other_emails:
+                        st.markdown(
+                            "**Third-party emails ignored** (web agencies, regulators, portals): "
+                            + ", ".join(f"`{e}`" for e in lead.other_emails)
+                        )
+                    if lead.pages_checked:
+                        st.markdown("**Pages checked:**")
+                        for page in lead.pages_checked:
+                            st.markdown(f"- {page}")
 
             st.write("---")
             st.markdown(f"**Target Sector CRMs / PMS:**")
