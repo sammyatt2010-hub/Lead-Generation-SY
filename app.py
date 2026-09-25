@@ -1,5 +1,6 @@
 import base64
 import hmac
+import html as html_lib
 import io
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -14,6 +15,369 @@ import requests
 import streamlit as st
 
 # ==========================================
+# DESIGN SYSTEM (theme, CSS & HTML components)
+# ==========================================
+
+APP_NAME = "Prospect Engine"
+APP_TAGLINE = "UK sales intelligence"
+
+APP_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --bg: #0A0E1A;
+  --surface: #111827;
+  --surface-2: #161F33;
+  --surface-3: #1C2740;
+  --border: rgba(148, 163, 184, 0.14);
+  --border-strong: rgba(148, 163, 184, 0.26);
+  --text: #E7EAF3;
+  --muted: #8C98B0;
+  --faint: #5E6A82;
+  --accent: #7C83FF;
+  --accent-2: #38D6F5;
+  --accent-soft: rgba(124, 131, 255, 0.14);
+  --good: #34D399;
+  --warn: #FBBF24;
+  --risk: #FB923C;
+  --bad: #F87171;
+  --radius: 14px;
+  --grad: linear-gradient(135deg, #7C83FF 0%, #38D6F5 100%);
+}
+
+html, body, [class*="css"], .stApp, button, input, textarea, select {
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important;
+}
+.stApp {
+  background:
+    radial-gradient(1200px 500px at 85% -10%, rgba(56, 214, 245, 0.07), transparent 60%),
+    radial-gradient(900px 500px at 10% -20%, rgba(124, 131, 255, 0.10), transparent 60%),
+    var(--bg);
+}
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stDecoration"] { display: none; }
+footer { visibility: hidden; }
+.block-container { padding-top: 1.6rem !important; padding-bottom: 3rem !important; max-width: 1500px; }
+
+/* ---------- Sidebar ---------- */
+[data-testid="stSidebar"] {
+  background: linear-gradient(180deg, #0D1322 0%, #0A0E1A 100%);
+  border-right: 1px solid var(--border);
+}
+[data-testid="stSidebar"] .block-container, [data-testid="stSidebarContent"] { padding-top: 0.6rem; }
+[data-testid="stSidebarUserContent"] { padding-top: 1rem; }
+
+/* ---------- Typography ---------- */
+h1, h2, h3, h4 { color: var(--text); letter-spacing: -0.02em; }
+p, li, label, .stMarkdown { color: var(--text); }
+[data-testid="stCaptionContainer"], .stCaption { color: var(--muted) !important; }
+[data-testid="stWidgetLabel"] p {
+  font-size: 0.76rem !important; font-weight: 600 !important; color: var(--muted) !important;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+/* ---------- Cards (bordered containers) ---------- */
+[data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]),
+div[data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius: var(--radius) !important;
+}
+.st-key-card-left, .st-key-card-select, .st-key-card-right, .st-key-card-login {
+  background: linear-gradient(180deg, rgba(22, 31, 51, 0.85) 0%, rgba(17, 24, 39, 0.85) 100%);
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius);
+  padding: 22px 22px 18px 22px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 20px 40px -24px rgba(0,0,0,0.6);
+}
+
+/* ---------- Inputs ---------- */
+[data-baseweb="input"], [data-baseweb="select"] > div, [data-baseweb="textarea"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 10px !important;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+[data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within, [data-baseweb="textarea"]:focus-within {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft) !important;
+}
+[data-baseweb="input"] input, [data-baseweb="textarea"] textarea { color: var(--text) !important; }
+[data-baseweb="input"] > div, [data-baseweb="base-input"] { background: transparent !important; }
+textarea { font-family: 'Inter', sans-serif !important; font-size: 0.9rem !important; line-height: 1.55 !important; }
+
+/* ---------- Buttons ---------- */
+.stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {
+  border-radius: 10px !important; font-weight: 600 !important; padding: 0.55rem 1.1rem !important;
+  border: 1px solid var(--border-strong) !important; background: var(--surface-2) !important;
+  color: var(--text) !important; transition: all .15s ease;
+}
+.stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {
+  border-color: var(--accent) !important; color: #fff !important; transform: translateY(-1px);
+}
+.stButton > button[kind="primary"], .stDownloadButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"], .stFormSubmitButton > button,
+[data-testid="stBaseButton-primary"] {
+  background: var(--grad) !important; border: none !important; color: #0A0E1A !important;
+  box-shadow: 0 8px 24px -10px rgba(124, 131, 255, 0.8);
+}
+.stButton > button[kind="primary"]:hover, [data-testid="stBaseButton-primary"]:hover {
+  filter: brightness(1.08); color: #0A0E1A !important;
+}
+.stButton > button[kind="primary"] p, [data-testid="stBaseButton-primary"] p, .stFormSubmitButton > button p { color: #0A0E1A !important; font-weight: 700 !important; }
+
+/* ---------- Tabs ---------- */
+[data-testid="stTabs"] [role="tablist"], [data-baseweb="tab-list"] {
+  gap: 4px; background: var(--surface); padding: 4px; border-radius: 12px; border: 1px solid var(--border);
+}
+[data-testid="stTabs"] [role="tab"], [data-baseweb="tab"] {
+  border-radius: 9px !important; padding: 8px 16px !important; height: auto !important;
+  color: var(--muted) !important; background: transparent !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"], [data-baseweb="tab"][aria-selected="true"] { background: var(--surface-3) !important; color: var(--text) !important; }
+[data-baseweb="tab-highlight"], [data-baseweb="tab-border"], [data-testid="stTabs"] .react-aria-SelectionIndicator { display: none !important; }
+[data-testid="stTabs"] [role="tab"] p { font-weight: 600; font-size: 0.86rem; }
+[data-testid="stTabs"] [role="tablist"] { width: fit-content; margin-bottom: 6px; }
+
+/* ---------- Table, expanders, alerts ---------- */
+[data-testid="stDataFrame"] { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+[data-testid="stExpander"] details { background: var(--surface); border: 1px solid var(--border) !important; border-radius: 12px !important; }
+[data-testid="stExpander"] summary p { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+[data-testid="stAlert"] { border-radius: 12px !important; border: 1px solid var(--border) !important; }
+[data-testid="stCode"] pre, .stCode pre { background: var(--surface) !important; border: 1px solid var(--border); border-radius: 12px; }
+hr { border-color: var(--border) !important; }
+
+/* ================= Custom components ================= */
+.pe-hero { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap;
+  padding: 6px 2px 22px 2px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.pe-eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent-2); margin-bottom: 8px; }
+.pe-eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 4px rgba(52,211,153,.15); }
+.pe-title { font-size: 2.05rem; font-weight: 800; letter-spacing: -0.035em; line-height: 1.1; margin: 0; color: var(--text); }
+.pe-title span { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.pe-sub { color: var(--muted); font-size: 0.95rem; margin-top: 8px; max-width: 620px; }
+
+.pe-stepper { display: flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 6px; }
+.pe-step { display: flex; align-items: center; gap: 8px; padding: 7px 14px 7px 7px; border-radius: 999px;
+  font-size: 0.82rem; font-weight: 600; color: var(--faint); white-space: nowrap; }
+.pe-step .num { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 0.72rem;
+  font-weight: 700; border: 1px solid var(--border-strong); color: var(--faint); }
+.pe-step.done { color: var(--muted); }
+.pe-step.done .num { background: rgba(52,211,153,.14); border-color: rgba(52,211,153,.45); color: var(--good); }
+.pe-step.active { background: var(--surface-3); color: var(--text); }
+.pe-step.active .num { background: var(--grad); border: none; color: #0A0E1A; }
+.pe-step-sep { width: 14px; height: 1px; background: var(--border-strong); }
+
+.pe-section { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.pe-section .badge { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent); font-weight: 800; font-size: 0.85rem; border: 1px solid rgba(124,131,255,.3); }
+.pe-section .t { font-size: 1.08rem; font-weight: 700; color: var(--text); line-height: 1.2; }
+.pe-section .s { font-size: 0.82rem; color: var(--muted); margin-top: 2px; }
+
+.pe-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pe-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 0.76rem;
+  font-weight: 600; background: var(--surface-3); color: var(--text); border: 1px solid var(--border); white-space: nowrap; }
+.pe-chip.accent { background: var(--accent-soft); color: #B9BDFF; border-color: rgba(124,131,255,.3); }
+.pe-chip.good { background: rgba(52,211,153,.12); color: var(--good); border-color: rgba(52,211,153,.3); }
+.pe-chip.warn { background: rgba(251,191,36,.12); color: var(--warn); border-color: rgba(251,191,36,.3); }
+.pe-chip.risk { background: rgba(251,146,60,.12); color: var(--risk); border-color: rgba(251,146,60,.3); }
+.pe-chip.bad { background: rgba(248,113,113,.12); color: var(--bad); border-color: rgba(248,113,113,.3); }
+.pe-chip.muted { background: transparent; color: var(--muted); }
+
+.pe-vertical { display: flex; gap: 14px; align-items: flex-start; background: var(--surface); border: 1px dashed var(--border-strong);
+  border-radius: 12px; padding: 12px 14px; margin: 2px 0 14px 0; }
+.pe-vertical .lbl { font-size: 0.7rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
+
+.pe-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 4px 0 14px 0; }
+.pe-kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.pe-kpi .v { font-size: 1.35rem; font-weight: 800; color: var(--text); letter-spacing: -0.02em; }
+.pe-kpi .l { font-size: 0.72rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+
+.pe-selected { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--accent-soft);
+  border: 1px solid rgba(124,131,255,.35); border-radius: 12px; padding: 12px 14px; margin: 14px 0 10px 0; }
+.pe-selected .n { font-weight: 700; color: var(--text); }
+.pe-selected .m { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
+.pe-hint { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 0.86rem; background: var(--surface);
+  border: 1px dashed var(--border-strong); border-radius: 12px; padding: 12px 14px; margin-top: 12px; }
+
+.pe-empty { text-align: center; padding: 48px 24px 40px 24px; }
+.pe-empty .t { font-size: 1.1rem; font-weight: 700; color: var(--text); margin-top: 14px; }
+.pe-empty .s { font-size: 0.88rem; color: var(--muted); margin: 6px auto 20px auto; max-width: 360px; line-height: 1.5; }
+.pe-empty ol { text-align: left; display: inline-block; margin: 0 auto; padding: 0; list-style: none; counter-reset: s; }
+.pe-empty li { counter-increment: s; color: var(--muted); font-size: 0.86rem; margin: 8px 0; display: flex; align-items: center; gap: 10px; }
+.pe-empty li::before { content: counter(s); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--surface-3); border: 1px solid var(--border-strong); font-size: 0.72rem; font-weight: 700; color: var(--text); }
+
+.pe-firm { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; }
+.pe-firm .name { font-size: 1.35rem; font-weight: 800; letter-spacing: -0.025em; color: var(--text); line-height: 1.2; }
+.pe-firm .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pe-firm .blurb { color: var(--muted); font-size: 0.86rem; line-height: 1.5; margin-top: 10px; font-style: italic; }
+
+.pe-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+@media (max-width: 1100px) { .pe-grid2 { grid-template-columns: 1fr; } .pe-kpis { grid-template-columns: 1fr 1fr 1fr; } }
+.pe-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+.pe-cols { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 0 18px; }
+@media (max-width: 1250px) { .pe-cols { grid-template-columns: 1fr; } }
+.pe-hook { margin-bottom: 10px; }
+.pe-panel .h { font-size: 0.7rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 10px; }
+
+.pe-contact { display: flex; align-items: center; gap: 12px; }
+.pe-avatar { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font-weight: 800; font-size: 0.95rem;
+  background: var(--grad); color: #0A0E1A; flex-shrink: 0; }
+.pe-contact .n { font-weight: 700; font-size: 1.02rem; color: var(--text); }
+.pe-contact .r { font-size: 0.8rem; color: var(--muted); margin-top: 2px; }
+
+.pe-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 0.86rem; }
+.pe-row:first-of-type { border-top: none; }
+.pe-row svg { color: var(--accent-2); flex-shrink: 0; }
+.pe-row a, .pe-row span { color: var(--text) !important; text-decoration: none; overflow-wrap: anywhere; }
+.pe-row .tag { color: var(--faint) !important; white-space: nowrap; }
+.pe-row a.trunc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; overflow-wrap: normal; }
+.pe-row a:hover { color: var(--accent-2) !important; }
+.pe-row .tag { margin-left: auto; font-size: 0.68rem; color: var(--faint); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+.pe-none { color: var(--faint); font-size: 0.84rem; font-style: italic; }
+
+.pe-officer { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 0.84rem; }
+.pe-officer:first-of-type { border-top: none; }
+.pe-officer .who { color: var(--text); font-weight: 600; }
+.pe-officer .since { color: var(--faint); font-size: 0.76rem; white-space: nowrap; }
+
+.pe-hook { background: linear-gradient(135deg, rgba(124,131,255,.12), rgba(56,214,245,.06)); border: 1px solid rgba(124,131,255,.28);
+  border-radius: 12px; padding: 14px 16px; }
+.pe-hook .h { font-size: 0.7rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #B9BDFF; }
+.pe-hook .t { font-weight: 700; color: var(--text); margin: 4px 0 10px 0; }
+.pe-hook ul { margin: 0; padding-left: 0; list-style: none; }
+.pe-hook li { font-size: 0.85rem; color: var(--text); padding: 4px 0 4px 24px; position: relative; }
+.pe-hook li::before { content: ""; position: absolute; left: 4px; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--grad); }
+
+/* Sidebar components */
+.pe-brand { display: flex; align-items: center; gap: 12px; padding: 4px 0 18px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.pe-logo { width: 40px; height: 40px; border-radius: 12px; background: var(--grad); display: grid; place-items: center; color: #0A0E1A;
+  box-shadow: 0 10px 24px -10px rgba(124,131,255,.9); }
+.pe-brand .n { font-weight: 800; font-size: 1.05rem; color: var(--text); letter-spacing: -0.02em; }
+.pe-brand .s { font-size: 0.75rem; color: var(--muted); }
+.pe-side-h { font-size: 0.68rem; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 18px 0 8px 0; }
+.pe-status { display: flex; align-items: center; justify-content: space-between; font-size: 0.84rem; color: var(--text); padding: 7px 0; }
+.pe-status .st { display: inline-flex; align-items: center; gap: 6px; font-size: 0.76rem; font-weight: 600; }
+.pe-status .st.ok { color: var(--good); } .pe-status .st.off { color: var(--bad); } .pe-status .st.idle { color: var(--muted); }
+.pe-status .st::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.pe-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.pe-stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px; text-align: center; }
+.pe-stat .v { font-weight: 800; font-size: 1.1rem; color: var(--text); }
+.pe-stat .l { font-size: 0.64rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; margin-top: 2px; }
+
+/* Login */
+.pe-login-head { text-align: center; margin: 8vh 0 22px 0; }
+.pe-login-head .pe-logo { width: 54px; height: 54px; margin: 0 auto 16px auto; border-radius: 16px; }
+.pe-login-head .t { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.03em; color: var(--text); }
+.pe-login-head .s { color: var(--muted); font-size: 0.92rem; margin-top: 6px; }
+</style>
+"""
+
+_ICON_PATHS = {
+    "mail": '<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>',
+    "phone": '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>',
+    "globe": '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    "pin": '<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>',
+    "target": '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+    "check": '<polyline points="20 6 9 17 4 12"/>',
+    "lock": '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    "pointer": '<path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/>',
+}
+
+
+def _full_width_kwargs() -> Dict[str, Any]:
+    """Full-width buttons: 'width' on Streamlit 1.46+, 'use_container_width' before that."""
+    import inspect
+    try:
+        if "width" in inspect.signature(st.button).parameters:
+            return {"width": "stretch"}
+    except (TypeError, ValueError):
+        pass
+    return {"use_container_width": True}
+
+
+FULL_WIDTH = _full_width_kwargs()
+
+
+def icon(name: str, size: int = 16, stroke: float = 2) -> str:
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        f' stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round">{_ICON_PATHS[name]}</svg>'
+    )
+
+
+def esc(value: Any) -> str:
+    """Escapes scraped/registry text before it goes into HTML."""
+    return html_lib.escape(str(value if value is not None else ""), quote=True)
+
+
+def render_html(markup: str, target=None) -> None:
+    """Renders HTML via markdown. Lines are flattened so markdown never treats indentation as code."""
+    flat = "".join(line.strip() for line in markup.splitlines())
+    (target or st).markdown(flat, unsafe_allow_html=True)
+
+
+def inject_css() -> None:
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+
+def chip(text: str, tone: str = "") -> str:
+    return f'<span class="pe-chip {tone}">{esc(text)}</span>'
+
+
+def section_header(num: str, title: str, subtitle: str = "") -> None:
+    render_html(
+        f'<div class="pe-section"><div class="badge">{num}</div><div>'
+        f'<div class="t">{esc(title)}</div>'
+        + (f'<div class="s">{esc(subtitle)}</div>' if subtitle else "")
+        + "</div></div>"
+    )
+
+
+def hero_html(active_step: int) -> str:
+    steps = ["Target", "Select", "Enrich", "Pitch"]
+    parts = []
+    for i, label in enumerate(steps, start=1):
+        state = "done" if i < active_step else "active" if i == active_step else ""
+        num = icon("check", 12, 3) if state == "done" else str(i)
+        parts.append(f'<div class="pe-step {state}"><span class="num">{num}</span>{label}</div>')
+    stepper = '<div class="pe-step-sep"></div>'.join(parts)
+    return (
+        '<div class="pe-hero"><div>'
+        '<div class="pe-eyebrow"><span class="dot"></span>Live UK registry · Open web intelligence</div>'
+        '<div class="pe-title">Prospect Discovery <span>&amp; Dossier Engine</span></div>'
+        '<div class="pe-sub">Find active UK firms by sector, surface the decision-maker and their'
+        ' direct channels, then generate a CRM-integration pitch and a one-page dossier.</div>'
+        f'</div><div class="pe-stepper">{stepper}</div></div>'
+    )
+
+
+def confidence_chip(confidence: Optional[str]) -> str:
+    tones = {
+        "High": ("good", "High-confidence match"),
+        "Medium": ("warn", "Medium-confidence match"),
+        "Low": ("risk", "Low-confidence match"),
+        "Manual": ("accent", "Website entered manually"),
+    }
+    tone, label = tones.get(confidence or "", ("bad", "Website not found"))
+    return chip(label, tone)
+
+
+def display_officer_name(raw: str) -> str:
+    """'BYWATER, Paul James' -> 'Paul James Bywater'; company officers are just title-cased."""
+    if "," in raw:
+        surname, forenames = raw.split(",", 1)
+        return f"{forenames.strip().title()} {surname.strip().title()}".strip()
+    return raw.title()
+
+
+def initials(name: str) -> str:
+    words = [w for w in re.split(r"[\s&/]+", name or "") if w and w[0].isalpha()]
+    return ("".join(w[0] for w in words[:2]) or "?").upper()
+
+
+# ==========================================
 # 0. PASSWORD GATEWAY (STREAMLIT SECRETS)
 # ==========================================
 
@@ -25,20 +389,15 @@ def check_password() -> bool:
     except Exception:
         configured_password = None
     if not configured_password:
-        st.set_page_config(page_title="Configuration Required", layout="centered")
-        st.title("🔒 App Locked")
-        st.error(
-            "APP_PASSWORD is not configured in Streamlit Secrets, so access is"
-            " blocked. Add it under App settings → Secrets."
+        st.set_page_config(page_title=f"{APP_NAME} · Locked", page_icon="🎯", layout="centered")
+        inject_css()
+        render_html(
+            f'<div class="pe-login-head"><div class="pe-logo">{icon("lock", 24, 2.2)}</div>'
+            '<div class="t">App locked</div>'
+            '<div class="s">APP_PASSWORD isn\'t set in Streamlit Secrets, so access is blocked.</div></div>'
         )
+        st.error("Add APP_PASSWORD under App settings → Secrets, then reload.")
         return False
-
-    def login_form():
-        with st.form("Credentials"):
-            st.text_input(
-                "Enter Access Password", type="password", key="password"
-            )
-            st.form_submit_button("Log In", on_click=password_entered)
 
     def password_entered():
         if hmac.compare_digest(
@@ -53,16 +412,26 @@ def check_password() -> bool:
     if st.session_state.get("password_correct", False):
         return True
 
-    st.set_page_config(page_title="Authentication Required", layout="centered")
-    st.title("🔒 Restricted Access")
-    st.caption("Please log in with the authorized password to continue.")
-    login_form()
-
-    if (
-        "password_correct" in st.session_state
-        and not st.session_state["password_correct"]
-    ):
-        st.error("😕 Incorrect password. Please try again.")
+    st.set_page_config(page_title=f"{APP_NAME} · Sign in", page_icon="🎯", layout="centered")
+    inject_css()
+    _, mid, _ = st.columns([1, 2.2, 1])
+    with mid:
+        render_html(
+            f'<div class="pe-login-head"><div class="pe-logo">{icon("target", 26, 2.2)}</div>'
+            f'<div class="t">{APP_NAME}</div>'
+            f'<div class="s">{APP_TAGLINE} · Authorised users only</div></div>'
+        )
+        with st.container(key="card-login"):
+            with st.form("Credentials", border=False):
+                st.text_input("Access password", type="password", key="password",
+                              placeholder="Enter your password")
+                st.form_submit_button("Sign in", on_click=password_entered,
+                                      type="primary", **FULL_WIDTH)
+            if (
+                "password_correct" in st.session_state
+                and not st.session_state["password_correct"]
+            ):
+                st.error("Incorrect password. Please try again.")
 
     return False
 
@@ -1242,12 +1611,12 @@ def create_pdf_dossier(
 def render_leads_table(df: pd.DataFrame, key: str):
     """Selectable company table with tidy columns. Works on old and new Streamlit versions."""
     column_config = {
-        "Company Name": st.column_config.TextColumn("Company Name", width="large"),
-        "Company Number": st.column_config.TextColumn("Company #", width="small"),
-        "Incorporated": st.column_config.DateColumn("Incorporated", format="DD MMM YYYY", width="small"),
-        "Town / Postcode": st.column_config.TextColumn("Town / Postcode", width="medium"),
+        "Company Name": st.column_config.TextColumn("Company Name", width=205),
+        "Company Number": st.column_config.TextColumn("Co. #", width=74),
+        "Incorporated": st.column_config.DateColumn("Since", format="MMM YYYY", width=78),
+        "Town": st.column_config.TextColumn("Town", width=95),
         "Companies House": st.column_config.LinkColumn(
-            "Registry", display_text="View ↗", width="small",
+            "Registry", display_text="View ↗", width=62,
             help="Opens the company's Companies House page in a new tab",
         ),
     }
@@ -1269,303 +1638,375 @@ def render_leads_table(df: pd.DataFrame, key: str):
 
 
 st.set_page_config(
-    page_title="Prospect Discovery & Dossier Engine", layout="wide"
+    page_title=f"{APP_NAME} · Prospect Discovery & Dossiers",
+    page_icon="🎯",
+    layout="wide",
 )
+inject_css()
 
-st.title("🎯 Prospect Discovery & Dossier Generator")
-st.caption(
-    "Source active UK companies, enrich contact channels, and generate"
-    " sector-tailored pitches and PDF briefings."
-)
+for _k, _v in {"stat_searches": 0, "stat_firms": 0, "stat_dossiers": 0}.items():
+    st.session_state.setdefault(_k, 0)
+
+hero_slot = st.empty()  # Filled at the end so the progress stepper reflects this run's actions
 
 try:
     secret_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
 except Exception:
     secret_ch_key = ""
 
+
+def columns(spec, **kwargs):
+    """st.columns with bottom alignment where supported (Streamlit 1.36+)."""
+    try:
+        return st.columns(spec, vertical_alignment="bottom", **kwargs)
+    except TypeError:
+        return st.columns(spec, **kwargs)
+
+
+# ---------------- Sidebar ----------------
 with st.sidebar:
-    st.header("Settings")
+    render_html(
+        f'<div class="pe-brand"><div class="pe-logo">{icon("target", 22, 2.2)}</div>'
+        f'<div><div class="n">{APP_NAME}</div><div class="s">{APP_TAGLINE}</div></div></div>'
+    )
+    render_html('<div class="pe-side-h">Connections</div>')
     if secret_ch_key:
         # Key stays server-side: never placed in a widget, so never sent to the browser.
         ch_api_key = secret_ch_key
-        st.success("Companies House API key loaded from Secrets.")
     else:
         ch_api_key = st.text_input(
-            "Companies House API Key",
+            "Companies House API key",
             type="password",
             help=(
                 "Not found in Secrets. Paste a key for this session, or add"
                 " COMPANIES_HOUSE_KEY to Streamlit Secrets."
             ),
         )
-    if st.button("Log Out"):
+    ch_state = ('ok">Connected' if secret_ch_key else ('idle">Session key' if ch_api_key else 'off">No key'))
+    render_html(
+        f'<div class="pe-status">Companies House<span class="st {ch_state}</span></div>'
+        '<div class="pe-status">Web discovery<span class="st ok">Ready</span></div>'
+        '<div class="pe-status">PDF dossiers<span class="st ok">Ready</span></div>'
+    )
+    render_html('<div class="pe-side-h">This session</div>')
+    sidebar_stats_slot = st.empty()
+    render_html('<div class="pe-side-h">Account</div>')
+    if st.button("Log out", **FULL_WIDTH):
         st.session_state["password_correct"] = False
         st.rerun()
 
-    st.divider()
-    st.markdown("**Workflow:**")
-    st.markdown("1. Search Active UK entities by SIC.")
-    st.markdown("2. Click any table row to select.")
-    st.markdown("3. Auto-find domain & scrape contact info.")
-    st.markdown("4. Review sector pitch & export PDF.")
 
-col_left, col_right = st.columns([1.05, 0.95])
+col_left, col_right = st.columns([1.08, 0.92], gap="large")
 
+# ---------------- Left: Target & Select ----------------
 with col_left:
-    st.subheader("Step 1: Pick Vertical & Location")
+    with st.container(key="card-left"):
+        section_header("01", "Target market", "Pick a sector and territory to pull live firms from Companies House.")
 
-    selected_vertical_name = st.selectbox(
-        "Target Industry Vertical",
-        options=list(VERTICAL_PRESETS.keys()),
-        index=0,
-    )
-    vertical_config = VERTICAL_PRESETS[selected_vertical_name]
-
-    f_col1, f_col2 = st.columns(2)
-    with f_col1:
-        location_input = st.text_input(
-            "Town, City, or County (Recommended)",
-            placeholder="e.g. Manchester, Walsall, Birmingham",
+        selected_vertical_name = st.selectbox(
+            "Industry vertical",
+            options=list(VERTICAL_PRESETS.keys()),
+            index=0,
         )
-    with f_col2:
-        keyword_filter = st.text_input(
-            "Name Keyword (Optional)",
-            placeholder=f"e.g. {vertical_config['search_hint']}",
+        vertical_config = VERTICAL_PRESETS[selected_vertical_name]
+        render_html(
+            '<div class="pe-vertical"><div style="flex:1">'
+            '<div class="lbl">Systems we integrate with</div><div class="pe-chips">'
+            + "".join(chip(c, "accent") for c in vertical_config["crms"])
+            + '</div></div><div><div class="lbl">SIC</div><div class="pe-chips">'
+            + "".join(chip(c) for c in vertical_config["sic_codes"])
+            + "</div></div></div>"
         )
 
-    r_col1, r_col2 = st.columns([1, 2])
-    with r_col1:
-        result_limit = st.selectbox("Results to fetch", [25, 50, 100], index=0)
-    with r_col2:
-        st.write("")
-        st.write("")
-        browse_btn = st.button("🔍 Feed Companies from Registry", type="primary")
-    target_row = None
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            location_input = st.text_input(
+                "Town, city or county",
+                placeholder="e.g. Walsall or West Midlands",
+            )
+        with f_col2:
+            keyword_filter = st.text_input(
+                "Name keyword (optional)",
+                placeholder=f"e.g. {vertical_config['search_hint']}",
+            )
 
-    if browse_btn:
-        if not ch_api_key:
-            st.error("Please supply your Companies House API key.")
-        else:
-            with st.spinner("Fetching active companies from registry..."):
-                enricher = LeadEnricher(ch_api_key=ch_api_key)
-                leads_list, search_error = enricher.browse_vertical(
-                    sic_codes=vertical_config["sic_codes"],
-                    location_keyword=location_input,
-                    company_name_includes=keyword_filter,
-                    limit=result_limit,
-                )
-            st.session_state["discovered_leads"] = leads_list
-            st.session_state["active_vertical_name"] = selected_vertical_name
-            st.session_state["selected_lead_row"] = None
-            # New search = new table widget, so no stale row selection carries over.
-            st.session_state["search_version"] = st.session_state.get("search_version", 0) + 1
-            if search_error:
-                st.error(search_error)
-            elif not leads_list:
-                st.warning(
-                    "No active companies matched. Try a broader location"
-                    " (e.g. county instead of town) or remove the name keyword."
-                )
+        r_col1, r_col2 = columns([1, 2.2])
+        with r_col1:
+            result_limit = st.selectbox("Results", [25, 50, 100], index=0)
+        with r_col2:
+            browse_btn = st.button(
+                "Find companies", type="primary", **FULL_WIDTH
+            )
+        target_row = None
+
+        if browse_btn:
+            if not ch_api_key:
+                st.error("Please supply your Companies House API key in the sidebar.")
+            else:
+                with st.spinner("Querying the Companies House register…"):
+                    enricher = LeadEnricher(ch_api_key=ch_api_key)
+                    leads_list, search_error = enricher.browse_vertical(
+                        sic_codes=vertical_config["sic_codes"],
+                        location_keyword=location_input,
+                        company_name_includes=keyword_filter,
+                        limit=result_limit,
+                    )
+                st.session_state["discovered_leads"] = leads_list
+                st.session_state["active_vertical_name"] = selected_vertical_name
+                st.session_state["search_location"] = location_input.strip()
+                st.session_state["selected_lead_row"] = None
+                # New search = new table widget, so no stale row selection carries over.
+                st.session_state["search_version"] = st.session_state.get("search_version", 0) + 1
+                if not search_error:
+                    st.session_state["stat_searches"] += 1
+                    st.session_state["stat_firms"] += len(leads_list)
+                if search_error:
+                    st.error(search_error)
+                elif not leads_list:
+                    st.warning(
+                        "No active companies matched. Try a broader location"
+                        " (e.g. county instead of town) or remove the name keyword."
+                    )
 
     if st.session_state.get("discovered_leads"):
-        st.write("---")
-        st.subheader("Step 2: Select Target Firm")
-        leads_data = st.session_state["discovered_leads"]
-        st.caption(
-            f"{len(leads_data)} active {'company' if len(leads_data) == 1 else 'companies'} found. 👉 Tick the box at the"
-            " left of a row to select it (click a column header to sort)."
-        )
-
-        df = pd.DataFrame(leads_data)
-        if "Incorporated" in df.columns:
-            df["Incorporated"] = pd.to_datetime(df["Incorporated"], errors="coerce")
-
-        table_event = render_leads_table(
-            df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
-        )
-
-        selected_rows = table_event.selection.rows if table_event else []
-
-        if selected_rows and selected_rows[0] < len(leads_data):
-            st.session_state["selected_lead_row"] = leads_data[selected_rows[0]]
-        else:
-            # Nothing ticked = nothing selected. Never fall back to row 1.
-            st.session_state["selected_lead_row"] = None
-
-        target_row = st.session_state["selected_lead_row"]
-
-    if st.session_state.get("discovered_leads") and not target_row:
-        st.info("☝️ Tick a company in the table above to continue.")
-
-    if st.session_state.get("discovered_leads") and target_row:
-        st.markdown(
-            f"**Selected Target:** `{target_row['Company Name']}`"
-            f" *(#{target_row['Company Number']} —"
-            f" {target_row['Town / Postcode']})*"
-        )
-
-        website_override = st.text_input(
-            "Website URL (Optional — leave blank to auto-discover):",
-            placeholder="e.g. hartnewhomes.co.uk",
-        )
-
-        enrich_btn = st.button(
-            f"⚡ Auto-Discover & Enrich: {target_row['Company Name']}",
-            type="secondary",
-        )
-
-        if enrich_btn:
-            with st.spinner("Finding commercial website & scraping contact channels..."):
-                enricher = LeadEnricher(ch_api_key=ch_api_key)
-                current_vertical = st.session_state.get(
-                    "active_vertical_name", "Estate & Lettings Agents"
-                )
-                enriched_lead = enricher.enrich_selected_company(
-                    company_number=target_row["Company Number"],
-                    sector_name=current_vertical,
-                    manual_website=website_override,
-                )
-                st.session_state["current_lead"] = enriched_lead
-                st.session_state.pop("custom_pitch_text", None)
-
-with col_right:
-    st.subheader("Step 3: Enriched Dossier & Pitch")
-
-    if "current_lead" in st.session_state:
-        lead: ScrapedLead = st.session_state["current_lead"]
-        current_vert_name = st.session_state.get(
-            "active_vertical_name", "Estate & Lettings Agents"
-        )
-        vert_cfg = VERTICAL_PRESETS[current_vert_name]
-
-        tab1, tab2 = st.tabs(["📋 Lead Card & Angles", "✉️ Email Pitch & PDF"])
-
-        with tab1:
-            b1, b2, b3 = st.columns(3)
-            b1.metric("Vertical", current_vert_name.split("/")[0])
-            b2.metric("Company #", lead.company_number or "N/A")
-            b3.metric(
-                "SIC Code",
-                ", ".join(lead.sic_codes) if lead.sic_codes else "Active",
+        with st.container(key="card-select"):
+            leads_data = st.session_state["discovered_leads"]
+            where = st.session_state.get("search_location") or "the UK"
+            section_header(
+                "02", "Select a firm",
+                f"{len(leads_data)} active {'firm' if len(leads_data) == 1 else 'firms'} in {where}"
+                f" · {st.session_state.get('active_vertical_name', '')}",
             )
 
-            st.markdown(f"### {lead.company_name}")
-            st.markdown(
-                f"📍 **Registered Office:** {lead.registered_address or 'Not listed'}"
-            )
+            df = pd.DataFrame(leads_data)
+            if "Town / Postcode" in df.columns:
+                df["Town"] = df["Town / Postcode"].astype(str).str.split(",").str[0]
+            if "Incorporated" in df.columns:
+                df["Incorporated"] = pd.to_datetime(df["Incorporated"], errors="coerce")
 
-            if lead.website_url:
-                badge = {"High": "🟢 High", "Medium": "🟡 Medium", "Low": "🟠 Low",
-                         "Manual": "✍️ Entered manually"}.get(lead.website_confidence or "", "")
-                st.markdown(
-                    f"🌐 **Website:** [{lead.website_url}]({lead.website_url})"
-                    + (f" — match confidence: **{badge}**" if badge else "")
-                )
-                if lead.website_reasons:
-                    st.caption("Why: " + "; ".join(lead.website_reasons))
-                if lead.website_confidence == "Low":
-                    st.warning(
-                        "This website is a weak match. Check it's the right firm before"
-                        " sending, or paste the correct URL on the left and re-run."
-                    )
+            table_event = render_leads_table(
+                df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
+            )
+            selected_rows = table_event.selection.rows if table_event else []
+
+            if selected_rows and selected_rows[0] < len(leads_data):
+                st.session_state["selected_lead_row"] = leads_data[selected_rows[0]]
             else:
-                st.warning(
-                    "🌐 Couldn't confidently find this firm's website. Paste it into"
-                    " the Website URL box on the left and re-run to pull contacts."
+                # Nothing ticked = nothing selected. Never fall back to row 1.
+                st.session_state["selected_lead_row"] = None
+            target_row = st.session_state["selected_lead_row"]
+
+            if not target_row:
+                render_html(
+                    f'<div class="pe-hint">{icon("pointer", 16)}'
+                    "Tick the box at the left of a row to choose a firm. Click a column header to sort.</div>"
                 )
-            if lead.discovery_notes:
-                with st.expander("Discovery notes"):
-                    for note in lead.discovery_notes:
-                        st.markdown(f"- {note}")
-
-            if lead.site_meta_description:
-                st.info(f"**Site Summary:** {lead.site_meta_description}")
-
-            st.markdown("#### Primary Contacts & Officers")
-            contact_name, contact_role = infer_contact_name_and_role(
-                lead, current_vert_name
-            )
-            st.markdown(f"**Identified Target:** `{contact_name}` ({contact_role})")
-
-            if lead.officers:
-                for off in lead.officers:
-                    st.markdown(
-                        f"- **{off.name}** — *{off.role}* (Appointed:"
-                        f" {off.appointed_on or 'N/A'})"
-                    )
             else:
-                st.caption("No registered officers returned by API.")
+                render_html(
+                    f'<div class="pe-selected"><div><div class="n">{esc(target_row["Company Name"])}</div>'
+                    f'<div class="m">#{esc(target_row["Company Number"])} · {esc(target_row["Town / Postcode"])}'
+                    f' · Inc. {esc(target_row.get("Incorporated", "N/A"))}</div></div>'
+                    f'{chip("Selected", "accent")}</div>'
+                )
+                e_col1, e_col2 = columns([1.6, 1])
+                with e_col1:
+                    website_override = st.text_input(
+                        "Website (optional)",
+                        placeholder="Leave blank to auto-discover",
+                    )
+                with e_col2:
+                    enrich_btn = st.button(
+                        "Enrich & build dossier", type="primary", **FULL_WIDTH
+                    )
 
-            st.markdown("#### Discovered Channels")
-            emails_display = (
-                ", ".join([f"`{e}`" for e in lead.emails_found])
-                if lead.emails_found
-                else "*None detected*"
-            )
-            phones_display = (
-                ", ".join([f"`{p}`" for p in lead.phones_found])
-                if lead.phones_found
-                else "*None detected*"
-            )
-            st.markdown(f"**Emails:** {emails_display}")
-            st.markdown(f"**Phones:** {phones_display}")
-            if lead.other_emails or lead.pages_checked:
-                with st.expander("Scrape details"):
-                    if lead.other_emails:
-                        st.markdown(
-                            "**Third-party emails ignored** (web agencies, regulators, portals): "
-                            + ", ".join(f"`{e}`" for e in lead.other_emails)
+                if enrich_btn:
+                    with st.spinner("Finding the firm's website and scraping contact channels…"):
+                        enricher = LeadEnricher(ch_api_key=ch_api_key)
+                        current_vertical = st.session_state.get(
+                            "active_vertical_name", "Estate & Lettings Agents"
                         )
-                    if lead.pages_checked:
-                        st.markdown("**Pages checked:**")
-                        for page in lead.pages_checked:
-                            st.markdown(f"- {page}")
+                        enriched_lead = enricher.enrich_selected_company(
+                            company_number=target_row["Company Number"],
+                            sector_name=current_vertical,
+                            manual_website=website_override,
+                        )
+                        st.session_state["current_lead"] = enriched_lead
+                        st.session_state.pop("custom_pitch_text", None)
+                        st.session_state["stat_dossiers"] += 1
 
-            st.write("---")
-            st.markdown(f"**Target Sector CRMs / PMS:**")
-            st.markdown(f"`{'`  •  `'.join(vert_cfg['crms'])}`")
-            st.markdown(f"**Core Hook Angle:** {vert_cfg['primary_hook']}")
 
-        with tab2:
-            st.markdown("#### Outreach Email Draft")
-            st.caption(
-                "Tweak the draft below if needed before downloading the dossier"
-                " or copying to your clipboard."
+# ---------------- Right: Dossier ----------------
+with col_right:
+    with st.container(key="card-right"):
+        if "current_lead" not in st.session_state:
+            render_html(
+                f'<div class="pe-empty"><div style="color:var(--accent);display:inline-block;'
+                f'padding:18px;border-radius:20px;background:var(--accent-soft);border:1px solid rgba(124,131,255,.3)">'
+                f'{icon("target", 40, 1.6)}</div>'
+                '<div class="t">Your dossier will appear here</div>'
+                '<div class="s">Every enriched firm gets a contact card, verified channels,'
+                ' a sector integration pitch and a one-page PDF.</div>'
+                "<ol><li>Choose a sector &amp; territory</li><li>Tick a firm in the results</li>"
+                "<li>Hit <b>&nbsp;Enrich &amp; build dossier</b></li></ol></div>"
+            )
+        else:
+            lead: ScrapedLead = st.session_state["current_lead"]
+            current_vert_name = st.session_state.get(
+                "active_vertical_name", "Estate & Lettings Agents"
+            )
+            vert_cfg = VERTICAL_PRESETS[current_vert_name]
+            contact_name, contact_role = infer_contact_name_and_role(lead, current_vert_name)
+            primary_email = pick_primary_email(lead, contact_name)
+
+            section_header("03", "Lead dossier", "Review, tailor the pitch and export.")
+
+            # Firm header
+            meta = [chip(f"#{lead.company_number or 'N/A'}"), chip(current_vert_name, "accent")]
+            meta += [chip(f"SIC {c}", "muted") for c in lead.sic_codes[:2]]
+            meta.append(confidence_chip(lead.website_confidence if lead.website_url else None))
+            blurb = (
+                f'<div class="blurb">“{esc(lead.site_meta_description[:220])}'
+                f'{"…" if len(lead.site_meta_description) > 220 else ""}”</div>'
+                if lead.site_meta_description else ""
+            )
+            render_html(
+                f'<div class="pe-firm"><div><div class="name">{esc(lead.company_name)}</div>'
+                f'<div class="meta">{"".join(meta)}</div>{blurb}</div></div>'
             )
 
-            if "custom_pitch_text" not in st.session_state:
-                st.session_state["custom_pitch_text"] = build_email_pitch(
-                    lead, current_vert_name
+            if not lead.website_url:
+                st.warning(
+                    "Couldn't confidently find this firm's website. Paste it into the"
+                    " Website box on the left and re-run to pull contacts."
+                )
+            elif lead.website_confidence == "Low":
+                st.warning(
+                    "Weak website match. Check it's the right firm before sending, or"
+                    " paste the correct website on the left and re-run."
                 )
 
-            edited_pitch = st.text_area(
-                "Email Body",
-                value=st.session_state["custom_pitch_text"],
-                height=250,
-            )
-            st.session_state["custom_pitch_text"] = edited_pitch
+            tab1, tab2 = st.tabs(["Overview", "Pitch & PDF"])
 
-            pdf_bytes = create_pdf_dossier(
-                lead=lead,
-                vertical_name=current_vert_name,
-                pitch_text=edited_pitch,
-                target_crms=vert_cfg["crms"],
-            )
-
-            d_col1, d_col2 = st.columns(2)
-            with d_col1:
-                clean_filename = f"dossier_{re.sub(r'[^a-zA-Z0-9]', '_', lead.company_name).lower()}.pdf"
-                st.download_button(
-                    label="📄 Download PDF Dossier",
-                    data=bytes(pdf_bytes),
-                    file_name=clean_filename,
-                    mime="application/pdf",
-                    type="primary",
+            with tab1:
+                # Contact + channels
+                email_rows = "".join(
+                    f'<div class="pe-row">{icon("mail", 15)}<a class="trunc" title="{esc(e)}" href="mailto:{esc(e)}">{esc(e)}</a>'
+                    + ('<span class="tag" title="Used in the email &amp; PDF">★ Primary</span>' if e == primary_email else "")
+                    + "</div>"
+                    for e in lead.emails_found[:5]
+                ) or '<div class="pe-none">No emails found</div>'
+                phone_rows = "".join(
+                    f'<div class="pe-row">{icon("phone", 15)}'
+                    f'<a href="tel:{esc(p.replace(" ", ""))}">{esc(p)}</a>'
+                    + ('<span class="tag">Main</span>' if i == 0 else "")
+                    + "</div>"
+                    for i, p in enumerate(lead.phones_found[:4])
+                ) or '<div class="pe-none">No phone numbers found</div>'
+                site_row = (
+                    f'<div class="pe-row">{icon("globe", 15)}<a href="{esc(lead.website_url)}" target="_blank">'
+                    f'{esc(lead.website_url.replace("https://", "").replace("http://", ""))}</a></div>'
+                    if lead.website_url else ""
                 )
-            with d_col2:
-                st.caption(
-                    "Formatted in the standard 1-page lead sheet style."
+                addr_row = (
+                    f'<div class="pe-row">{icon("pin", 15)}<span>{esc(lead.registered_address)}</span>'
+                    '<span class="tag">Reg. office</span></div>'
+                    if lead.registered_address else ""
+                )
+                render_html(
+                    '<div class="pe-panel"><div class="h">Decision-maker</div>'
+                    f'<div class="pe-contact"><div class="pe-avatar">{esc(initials(contact_name))}</div>'
+                    f'<div><div class="n">{esc(contact_name)}</div><div class="r">{esc(contact_role)}</div></div></div>'
+                    f'<div style="margin-top:12px">{site_row}{addr_row}</div></div>'
+                    '<div class="pe-panel"><div class="h">Channels</div><div class="pe-cols">'
+                    f'<div>{email_rows}</div><div>{phone_rows}</div></div></div>'
                 )
 
-    else:
-        st.info("Select a company from the feed to run automated discovery.")
+                # Officers + integration hook
+                officer_rows = "".join(
+                    f'<div class="pe-officer"><span><span class="who">{esc(display_officer_name(o.name))}</span>'
+                    f' <span style="color:var(--muted)">· {esc(o.role)}</span></span>'
+                    f'<span class="since">since {esc((o.appointed_on or "N/A")[:4])}</span></div>'
+                    for o in lead.officers[:6]
+                ) or '<div class="pe-none">No active officers returned</div>'
+                hook_items = "".join(f"<li>{esc(b)}</li>" for b in vert_cfg["pitch_bullets"])
+                render_html(
+                    f'<div class="pe-hook"><div class="h">Integration hook</div>'
+                    f'<div class="t">{esc(vert_cfg["primary_hook"])}</div><ul>{hook_items}</ul></div>'
+                    f'<div class="pe-panel"><div class="h">Registered officers ({len(lead.officers)})</div>{officer_rows}</div>'
+                )
+
+                if lead.website_reasons or lead.discovery_notes or lead.other_emails or lead.pages_checked:
+                    with st.expander("How this was found"):
+                        if lead.website_reasons:
+                            st.markdown("**Website match:** " + "; ".join(lead.website_reasons))
+                        for note in lead.discovery_notes:
+                            st.markdown(f"- {note}")
+                        if lead.other_emails:
+                            st.markdown(
+                                "**Third-party emails ignored** (agencies, regulators, portals): "
+                                + ", ".join(f"`{e}`" for e in lead.other_emails)
+                            )
+                        if lead.pages_checked:
+                            st.markdown("**Pages checked:** " + " · ".join(lead.pages_checked))
+
+            with tab2:
+                if "custom_pitch_text" not in st.session_state:
+                    st.session_state["custom_pitch_text"] = build_email_pitch(
+                        lead, current_vert_name
+                    )
+                to_line = primary_email or "no email found"
+                render_html(
+                    f'<div class="pe-chips" style="margin-bottom:10px">{chip("To: " + to_line, "accent")}'
+                    f'{chip("Greeting: " + contact_name)}</div>'
+                )
+                edited_pitch = st.text_area(
+                    "Email body",
+                    value=st.session_state["custom_pitch_text"],
+                    height=360,
+                )
+                st.session_state["custom_pitch_text"] = edited_pitch
+
+                pdf_bytes = create_pdf_dossier(
+                    lead=lead,
+                    vertical_name=current_vert_name,
+                    pitch_text=edited_pitch,
+                    target_crms=vert_cfg["crms"],
+                )
+                clean_filename = (
+                    f"dossier_{re.sub(r'[^a-zA-Z0-9]', '_', lead.company_name).lower()}.pdf"
+                )
+                d_col1, d_col2 = st.columns(2)
+                with d_col1:
+                    st.download_button(
+                        label="Download PDF dossier",
+                        data=bytes(pdf_bytes),
+                        file_name=clean_filename,
+                        mime="application/pdf",
+                        type="primary",
+                        **FULL_WIDTH,
+                    )
+                with d_col2:
+                    copy_open = st.toggle("Show copy-ready email", value=False)
+                if copy_open:
+                    st.caption("Use the copy icon at the top-right of the box, then paste into Outlook.")
+                    st.code(edited_pitch, language=None)
+
+
+# ---------------- Late-rendered pieces (reflect this run's state) ----------------
+if "current_lead" in st.session_state:
+    active_step = 4
+elif st.session_state.get("selected_lead_row"):
+    active_step = 3
+elif st.session_state.get("discovered_leads"):
+    active_step = 2
+else:
+    active_step = 1
+render_html(hero_html(active_step), target=hero_slot)
+render_html(
+    '<div class="pe-stats">'
+    f'<div class="pe-stat"><div class="v">{st.session_state["stat_searches"]}</div><div class="l">Searches</div></div>'
+    f'<div class="pe-stat"><div class="v">{st.session_state["stat_firms"]}</div><div class="l">Firms</div></div>'
+    f'<div class="pe-stat"><div class="v">{st.session_state["stat_dossiers"]}</div><div class="l">Dossiers</div></div>'
+    "</div>",
+    target=sidebar_stats_slot,
+)
