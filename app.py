@@ -1,4 +1,5 @@
 import base64
+import hmac
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
@@ -7,6 +8,50 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 import requests
 import streamlit as st
+
+# ==========================================
+# 0. PASSWORD GATEWAY (STREAMLIT SECRETS)
+# ==========================================
+
+
+def check_password() -> bool:
+    """Returns True if the user had a correct password, or halts execution with a login form."""
+
+    # If no secret is configured, let the user in with a warning
+    if "APP_PASSWORD" not in st.secrets:
+        return True
+
+    def login_form():
+        with st.form("Credentials"):
+            st.text_input("Enter Access Password", type="password", key="password")
+            st.form_submit_button("Log In", on_click=password_entered)
+
+    def password_entered():
+        if hmac.compare_digest(
+            st.session_state["password"], st.secrets["APP_PASSWORD"]
+        ):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't keep the password in memory
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct", False):
+        return True
+
+    # Show login prompt
+    st.set_page_config(page_title="Authentication Required", layout="centered")
+    st.title("🔒 Restricted Access")
+    st.caption("Please log in with the authorized password to continue.")
+    login_form()
+
+    if "password_correct" in st.session_state and not st.session_state["password_correct"]:
+        st.error("😕 Incorrect password. Please try again.")
+
+    return False
+
+
+if not check_password():
+    st.stop()  # Halt execution until authenticated
 
 # ==========================================
 # 1. DATA MODELS & SECTOR CONFIGURATION
@@ -57,7 +102,6 @@ class LeadEnricher:
     def _get_auth_headers(self) -> Dict[str, str]:
         if not self.ch_api_key:
             return {}
-        # Companies House requires HTTP Basic Auth with API key as username and empty password
         token = base64.b64encode(f"{self.ch_api_key}:".encode("utf-8")).decode(
             "utf-8"
         )
@@ -109,7 +153,6 @@ class LeadEnricher:
             )
             if resp.status_code == 200:
                 for item in resp.json().get("items", []):
-                    # Filter out resigned directors
                     if not item.get("resigned_on"):
                         officers.append(
                             OfficerInfo(
@@ -146,24 +189,20 @@ class LeadEnricher:
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Meta description
                 meta_tag = soup.find("meta", attrs={"name": "description"})
                 if meta_tag and meta_tag.get("content"):
                     results["description"] = meta_tag["content"].strip()
 
-                # mailto links
                 for mailto in soup.select('a[href^="mailto:"]'):
                     email = mailto["href"].replace("mailto:", "").split("?")[0]
                     if email and "@" in email:
                         results["emails"].add(email.strip().lower())
 
-                # tel links
                 for tel in soup.select('a[href^="tel:"]'):
                     phone = tel["href"].replace("tel:", "").strip()
                     if len(phone) >= 9:
                         results["phones"].add(phone)
 
-                # Regex UK phone backup
                 raw_text = soup.get_text()
                 uk_phones = re.findall(
                     r"(?:(?:\+44\s?\(0\)\s?|\+44\s?|0)[1-9]\d{2,4}\s?\d{3,4}\s?\d{3,4})",
@@ -195,7 +234,6 @@ class LeadEnricher:
             company_num = top_hit.get("company_number")
             ch_data = self.get_company_details(company_num)
 
-        # Build address
         address_dict = ch_data.get("registered_office_address", {})
         address_parts = [
             address_dict.get(k)
@@ -212,7 +250,6 @@ class LeadEnricher:
             ", ".join(address_parts) if address_parts else None
         )
 
-        # Detect sector from SIC code
         sic_codes = ch_data.get("sic_codes", [])
         sector_guess = "General B2B"
         for code in sic_codes:
@@ -220,7 +257,6 @@ class LeadEnricher:
                 sector_guess = SIC_SECTORS[code]
                 break
 
-        # Officers & web contacts
         officers = self.get_officers(company_num) if company_num else []
         site_contacts = (
             self.scrape_website(website)
@@ -243,7 +279,7 @@ class LeadEnricher:
 
 
 # ==========================================
-# 3. STREAMLIT FRONTEND
+# 3. AUTHENTICATED FRONTEND
 # ==========================================
 
 st.set_page_config(page_title="Lead Dossier Ingestion", layout="wide")
@@ -254,13 +290,21 @@ st.caption(
     " prospect dossier."
 )
 
+# Pull key from secrets if available, otherwise allow manual sidebar input
+default_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
+
 with st.sidebar:
     st.header("Settings")
     ch_api_key = st.text_input(
         "Companies House API Key",
+        value=default_ch_key,
         type="password",
         help="Free key from developer.company-information.service.gov.uk",
     )
+    if st.button("Log Out"):
+        st.session_state["password_correct"] = False
+        st.rerun()
+
     st.divider()
     st.markdown("**Supported Verticals**")
     st.markdown("- Estate & Lettings (SIC 68310)")
@@ -296,7 +340,6 @@ if "current_lead" in st.session_state:
     with col2:
         st.subheader("2. Ingested Target Profile")
 
-        # Metrics overview
         badge_cols = st.columns(3)
         badge_cols[0].metric("Detected Vertical", lead.sector_guess)
         badge_cols[1].metric("Company Number", lead.company_number or "N/A")
