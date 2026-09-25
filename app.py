@@ -1,8 +1,8 @@
 import base64
 import hmac
 import re
-from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from typing import Any, Dict, List, Optional, Set
+from urllib.parse import quote_plus, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -64,27 +64,27 @@ VERTICAL_PRESETS = {
     "Estate & Lettings Agents": {
         "sic_codes": ["68310"],
         "description": "Real estate agencies & letting operations",
-        "search_hint": "Property, Lettings, Estates",
+        "search_hint": "Estate Agents",
     },
     "Dental Practices": {
         "sic_codes": ["86230"],
         "description": "Dental practice activities",
-        "search_hint": "Dental, Teeth, Orthodontic",
+        "search_hint": "Dental Practice",
     },
     "Solicitors & Legal Practices": {
         "sic_codes": ["69102"],
         "description": "Solicitors & legal service providers",
-        "search_hint": "Solicitors, Law, Legal",
+        "search_hint": "Solicitors",
     },
     "Accountants & Auditors": {
         "sic_codes": ["69201"],
-        "description": "Accounting, bookkeeping, auditing & tax consultancy",
-        "search_hint": "Accountants, Accountancy, Tax",
+        "description": "Accounting, bookkeeping & tax consultancy",
+        "search_hint": "Accountants",
     },
     "General Medical Clinics": {
         "sic_codes": ["86210"],
         "description": "General medical practice activities",
-        "search_hint": "Clinic, Medical, Health",
+        "search_hint": "Clinic",
     },
 }
 
@@ -119,6 +119,12 @@ class LeadEnricher:
         self.ch_api_key = ch_api_key.strip() if ch_api_key else None
         self.base_url = "https://api.company-information.service.gov.uk"
         self.headers = self._get_auth_headers()
+        self.web_headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                " (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        }
 
     def _get_auth_headers(self) -> Dict[str, str]:
         if not self.ch_api_key:
@@ -133,7 +139,7 @@ class LeadEnricher:
         sic_codes: List[str],
         location_keyword: Optional[str] = None,
         company_name_includes: Optional[str] = None,
-        limit: int = 15,
+        limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """Feed active companies by SIC code vertical and location."""
         if not self.ch_api_key:
@@ -181,42 +187,6 @@ class LeadEnricher:
         except Exception:
             pass
 
-        # Fallback to standard search if advanced search has zero results with location
-        if location_keyword:
-            return self.search_company_by_keyword(
-                f"{company_name_includes or ''} {location_keyword}", limit=limit
-            )
-
-        return []
-
-    def search_company_by_keyword(
-        self, query: str, limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        """Standard search fallback."""
-        if not self.ch_api_key or not query.strip():
-            return []
-        url = f"{self.base_url}/search/companies"
-        try:
-            resp = requests.get(
-                url,
-                headers=self.headers,
-                params={"q": query, "items_per_page": limit},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                items = resp.json().get("items", [])
-                return [
-                    {
-                        "Company Name": i.get("title", ""),
-                        "Company Number": i.get("company_number", ""),
-                        "Incorporated": i.get("date_of_creation", "N/A"),
-                        "Town / Postcode": i.get("address_snippet", ""),
-                        "Status": i.get("company_status", "").title(),
-                    }
-                    for i in items
-                ]
-        except Exception:
-            pass
         return []
 
     def get_company_details(self, company_number: str) -> Dict[str, Any]:
@@ -259,66 +229,159 @@ class LeadEnricher:
             pass
         return officers
 
-    def scrape_website(self, url: str) -> Dict[str, Any]:
-        results = {"emails": set(), "phones": set(), "description": ""}
-        if not url:
-            return results
+    def auto_discover_website(
+        self, company_name: str, location: Optional[str] = None
+    ) -> Optional[str]:
+        """Automatically find the company's official domain via web query."""
+        clean_name = re.sub(
+            r"\b(LTD|LIMITED|PLC|LLP|GROUP|UK)\b",
+            "",
+            company_name,
+            flags=re.IGNORECASE,
+        ).strip()
+        query = f"{clean_name} {location or ''} official website UK"
 
-        clean_url = url.strip()
-        if not clean_url.startswith("http"):
-            clean_url = f"https://{clean_url}"
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                " (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        }
-
+        search_url = (
+            f"https://html.duckduckgo.com/html/?q={quote_plus(query.strip())}"
+        )
         try:
-            resp = requests.get(clean_url, headers=headers, timeout=8)
+            resp = requests.get(
+                search_url, headers=self.web_headers, timeout=6
+            )
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
+                links = soup.select(".result__url")
+                blocked_domains = [
+                    "find-and-update.company-information.service.gov.uk",
+                    "companieshouse",
+                    "endole.co.uk",
+                    "duedil.com",
+                    "linkedin.com",
+                    "facebook.com",
+                    "yell.com",
+                    "checkcompany.co.uk",
+                    "thephonebook.bt.com",
+                    "192.com",
+                ]
 
-                meta_tag = soup.find("meta", attrs={"name": "description"})
-                if meta_tag and meta_tag.get("content"):
-                    results["description"] = meta_tag["content"].strip()
-
-                for mailto in soup.select('a[href^="mailto:"]'):
-                    email = mailto["href"].replace("mailto:", "").split("?")[0]
-                    if email and "@" in email:
-                        results["emails"].add(email.strip().lower())
-
-                for tel in soup.select('a[href^="tel:"]'):
-                    phone = tel["href"].replace("tel:", "").strip()
-                    if len(phone) >= 9:
-                        results["phones"].add(phone)
-
-                raw_text = soup.get_text()
-                uk_phones = re.findall(
-                    r"(?:(?:\+44\s?\(0\)\s?|\+44\s?|0)[1-9]\d{2,4}\s?\d{3,4}\s?\d{3,4})",
-                    raw_text,
-                )
-                for p in uk_phones[:3]:
-                    cleaned = p.strip()
-                    if len(cleaned) >= 10:
-                        results["phones"].add(cleaned)
+                for link in links:
+                    raw_text = link.get_text().strip()
+                    # ensure valid domain formatting
+                    domain = raw_text.split("/")[0].strip()
+                    if domain and not any(b in domain for b in blocked_domains):
+                        return f"https://{domain}"
         except Exception:
             pass
+        return None
+
+    def scrape_contact_channels(self, base_url: str) -> Dict[str, Any]:
+        """Deep scrape the homepage and /contact /about pages for email & phone."""
+        emails: Set[str] = set()
+        phones: Set[str] = set()
+        description = ""
+
+        if not base_url:
+            return {
+                "emails": [],
+                "phones": [],
+                "description": "",
+                "resolved_url": None,
+            }
+
+        if not base_url.startswith("http"):
+            base_url = f"https://{base_url}"
+
+        # Clean base url to root domain
+        parsed = urlparse(base_url)
+        root = f"{parsed.scheme}://{parsed.netloc}"
+
+        pages_to_check = [
+            root,
+            urljoin(root, "/contact"),
+            urljoin(root, "/contact-us"),
+            urljoin(root, "/about"),
+        ]
+
+        for url in pages_to_check:
+            try:
+                resp = requests.get(url, headers=self.web_headers, timeout=6)
+                if resp.status_code != 200:
+                    continue
+
+                soup = BeautifulSoup(resp.text, "html.parser")
+
+                # Grab description from homepage
+                if not description:
+                    meta_tag = soup.find("meta", attrs={"name": "description"})
+                    if meta_tag and meta_tag.get("content"):
+                        description = meta_tag["content"].strip()
+
+                # 1. Scrape mailto links
+                for mailto in soup.select('a[href^="mailto:"]'):
+                    em = mailto["href"].replace("mailto:", "").split("?")[0]
+                    em_clean = em.strip().lower()
+                    if em_clean and "@" in em_clean and "." in em_clean:
+                        # filter out standard tracking or asset emails
+                        if not any(
+                            ext in em_clean
+                            for ext in [".png", ".jpg", "sentry.io"]
+                        ):
+                            emails.add(em_clean)
+
+                # 2. Scrape tel links
+                for tel in soup.select('a[href^="tel:"]'):
+                    ph = tel["href"].replace("tel:", "").strip()
+                    if len(ph) >= 9:
+                        phones.add(ph)
+
+                # 3. Regex sweep for UK phone & in-text email addresses
+                page_text = soup.get_text()
+
+                text_emails = re.findall(
+                    r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+                    page_text,
+                )
+                for te in text_emails:
+                    te_clean = te.strip().lower()
+                    if not any(
+                        ext in te_clean
+                        for ext in [
+                            ".png",
+                            ".jpg",
+                            ".webp",
+                            "wixpress.com",
+                            "sentry.io",
+                        ]
+                    ):
+                        emails.add(te_clean)
+
+                uk_phones = re.findall(
+                    r"(?:(?:\+44\s?\(0\)\s?|\+44\s?|0)[1-9]\d{2,4}\s?\d{3,4}\s?\d{3,4})",
+                    page_text,
+                )
+                for p in uk_phones[:4]:
+                    cleaned = p.strip()
+                    if len(cleaned) >= 10:
+                        phones.add(cleaned)
+
+            except Exception:
+                continue
 
         return {
-            "emails": list(results["emails"]),
-            "phones": list(results["phones"]),
-            "description": results["description"],
+            "emails": sorted(list(emails)),
+            "phones": sorted(list(phones)),
+            "description": description,
+            "resolved_url": root,
         }
 
     def enrich_selected_company(
         self,
         company_number: str,
         sector_name: str,
-        website: Optional[str] = None,
+        manual_website: Optional[str] = None,
     ) -> ScrapedLead:
         ch_data = self.get_company_details(company_number)
+        company_name = ch_data.get("company_name", company_number)
 
         address_dict = ch_data.get("registered_office_address", {})
         address_parts = [
@@ -335,21 +398,38 @@ class LeadEnricher:
         registered_address = (
             ", ".join(address_parts) if address_parts else None
         )
+        town_or_postcode = address_dict.get("locality") or address_dict.get(
+            "postal_code"
+        )
 
         officers = self.get_officers(company_number)
+
+        # Website discovery step: manual input first, auto-search if empty
+        target_website = manual_website.strip() if manual_website else None
+        if not target_website:
+            target_website = self.auto_discover_website(
+                company_name, location=town_or_postcode
+            )
+
+        # Scrape web contacts
         site_contacts = (
-            self.scrape_website(website)
-            if website
-            else {"emails": [], "phones": [], "description": ""}
+            self.scrape_contact_channels(target_website)
+            if target_website
+            else {
+                "emails": [],
+                "phones": [],
+                "description": "",
+                "resolved_url": None,
+            }
         )
 
         return ScrapedLead(
-            company_name=ch_data.get("company_name", company_number),
+            company_name=company_name,
             company_number=company_number,
             sic_codes=ch_data.get("sic_codes", []),
             sector_guess=sector_name,
             registered_address=registered_address,
-            website_url=website,
+            website_url=site_contacts.get("resolved_url") or target_website,
             phones_found=site_contacts["phones"],
             emails_found=site_contacts["emails"],
             officers=officers,
@@ -358,15 +438,15 @@ class LeadEnricher:
 
 
 # ==========================================
-# 3. STREAMLIT APPLICATION (FEED FLOW)
+# 3. STREAMLIT APPLICATION
 # ==========================================
 
 st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-st.title("🎯 Prospect Feed & Enrichment Engine")
+st.title("🎯 Prospect Feed & Automated Web Discovery")
 st.caption(
-    "Browse live UK companies by industry vertical and location, then enrich on"
-    " demand."
+    "Query the Companies House registry, then automatically discover their"
+    " commercial domain, contact numbers, and emails."
 )
 
 default_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
@@ -384,10 +464,10 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.markdown("**How this works:**")
-    st.markdown("1. Choose vertical & target town.")
-    st.markdown("2. Review company list from registry.")
-    st.markdown("3. Select one & enrich into dossier.")
+    st.markdown("**Automated Pipeline:**")
+    st.markdown("1. Search Active UK entities by SIC.")
+    st.markdown("2. Select an operating firm.")
+    st.markdown("3. Auto-find domain & scrape direct contact points.")
 
 col_left, col_right = st.columns([1.1, 0.9])
 
@@ -404,25 +484,22 @@ with col_left:
     f_col1, f_col2 = st.columns(2)
     with f_col1:
         location_input = st.text_input(
-            "Town, City, or County (Optional)",
-            placeholder="e.g. Manchester, Chester, Shrewsbury",
+            "Town, City, or County (Recommended)",
+            placeholder="e.g. Manchester, Chester, Birmingham",
         )
     with f_col2:
         keyword_filter = st.text_input(
             "Name Keyword (Optional)",
-            placeholder=f"e.g. {vertical_config['search_hint'].split(',')[0]}",
+            placeholder=f"e.g. {vertical_config['search_hint']}",
         )
 
     browse_btn = st.button("🔍 Feed Companies from Registry", type="primary")
 
     if browse_btn:
         if not ch_api_key:
-            st.error(
-                "Please ensure your Companies House API key is provided in the"
-                " sidebar or secrets."
-            )
+            st.error("Please supply your Companies House API key.")
         else:
-            with st.spinner("Querying active registry entities..."):
+            with st.spinner("Fetching active companies from registry..."):
                 enricher = LeadEnricher(ch_api_key=ch_api_key)
                 leads_list = enricher.browse_vertical(
                     sic_codes=vertical_config["sic_codes"],
@@ -433,7 +510,7 @@ with col_left:
                 st.session_state["discovered_leads"] = leads_list
                 st.session_state["active_vertical_name"] = selected_vertical_name
 
-    # Step 2: Show Discovered Companies
+    # Step 2: Select & Auto-Enrich
     if st.session_state.get("discovered_leads"):
         st.write("---")
         st.subheader("Step 2: Select a Target to Enrich")
@@ -442,7 +519,6 @@ with col_left:
         df = pd.DataFrame(leads_data)
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # Selection Dropdown
         company_options = {
             f"{row['Company Name']} ({row['Company Number']}) — {row['Town / Postcode']}": row[
                 "Company Number"
@@ -451,20 +527,21 @@ with col_left:
         }
 
         selected_label = st.selectbox(
-            "Choose Company to Generate Dossier:",
-            options=list(company_options.keys()),
+            "Choose Company to Enrich:", options=list(company_options.keys())
         )
         selected_company_number = company_options[selected_label]
 
-        website_enrich_input = st.text_input(
-            "Company Website (Optional - for scraping phone/email/description):",
-            placeholder="e.g. companyname.co.uk",
+        website_override = st.text_input(
+            "Website URL (Optional — leave blank to auto-discover):",
+            placeholder="e.g. scriven.co.uk",
         )
 
-        enrich_btn = st.button("⚡ Enrich Target Profile", type="secondary")
+        enrich_btn = st.button(
+            "⚡ Auto-Discover Website & Enrich Contacts", type="secondary"
+        )
 
         if enrich_btn:
-            with st.spinner("Extracting officers, filing history, and web data..."):
+            with st.spinner("Finding commercial website & scraping contact channels..."):
                 enricher = LeadEnricher(ch_api_key=ch_api_key)
                 current_vertical = st.session_state.get(
                     "active_vertical_name", "General B2B"
@@ -472,7 +549,7 @@ with col_left:
                 enriched_lead = enricher.enrich_selected_company(
                     company_number=selected_company_number,
                     sector_name=current_vertical,
-                    website=website_enrich_input,
+                    manual_website=website_override,
                 )
                 st.session_state["current_lead"] = enriched_lead
 
@@ -482,7 +559,6 @@ with col_right:
     if "current_lead" in st.session_state:
         lead: ScrapedLead = st.session_state["current_lead"]
 
-        # Metric Badges
         b1, b2, b3 = st.columns(3)
         b1.metric("Vertical", lead.sector_guess.split("/")[0])
         b2.metric("Company #", lead.company_number or "N/A")
@@ -497,7 +573,9 @@ with col_right:
         )
 
         if lead.website_url:
-            st.markdown(f"🌐 **Website:** [{lead.website_url}](https://{lead.website_url})")
+            st.markdown(f"🌐 **Discovered Website:** [{lead.website_url}]({lead.website_url})")
+        else:
+            st.warning("⚠️ Commercial website could not be automatically resolved. You can paste it in the override box on the left.")
 
         if lead.site_meta_description:
             st.info(f"**Site Summary:** {lead.site_meta_description}")
@@ -515,17 +593,24 @@ with col_right:
 
         st.write("---")
         st.markdown("#### Scraped Contact Channels")
-        st.markdown(
-            "**Emails:** " + (", ".join(lead.emails_found) or "None detected")
-        )
-        st.markdown(
-            "**Phone Numbers:** "
-            + (", ".join(lead.phones_found) or "None detected")
-        )
 
+        if lead.emails_found:
+            st.markdown("**Discovered Inboxes:**")
+            for em in lead.emails_found:
+                st.markdown(f"- ✉️ `{em}`")
+        else:
+            st.markdown("**Emails:** *None found on crawled pages*")
+
+        if lead.phones_found:
+            st.markdown("**Discovered Telephones:**")
+            for ph in lead.phones_found:
+                st.markdown(f"- 📞 `{ph}`")
+        else:
+            st.markdown("**Phones:** *None found on crawled pages*")
+
+        st.write("---")
         st.success(
-            "Target ready. Next step: Generate tailored industry pitch &"
-            " email copy."
+            "Profile ready. Next: Connect LLM Pitch & Dossier PDF Builder."
         )
     else:
-        st.info("Pick a vertical and company on the left to see the enriched dossier here.")
+        st.info("Select a company from the feed to run automated discovery.")
