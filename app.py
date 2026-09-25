@@ -1,10 +1,12 @@
 import base64
 import hmac
+import io
 import re
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote_plus, urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from fpdf import FPDF
 import pandas as pd
 from pydantic import BaseModel, Field
 import requests
@@ -16,7 +18,6 @@ import streamlit as st
 
 
 def check_password() -> bool:
-    """Returns True if user is authenticated via APP_PASSWORD in secrets."""
     if "APP_PASSWORD" not in st.secrets:
         return True
 
@@ -57,7 +58,7 @@ if not check_password():
     st.stop()
 
 # ==========================================
-# 1. VERTICALS & DATA MODELS
+# 1. VERTICALS, CRMS & PITCH PLAYBOOKS
 # ==========================================
 
 VERTICAL_PRESETS = {
@@ -65,26 +66,132 @@ VERTICAL_PRESETS = {
         "sic_codes": ["68310"],
         "description": "Real estate agencies & letting operations",
         "search_hint": "Estate Agents",
+        "crms": ["Street", "Alto", "Reapit", "Dezrez", "Jupix"],
+        "primary_hook": "CRM Screen-Pop & Property File Sync",
+        "pitch_bullets": [
+            (
+                "Screen pop-up of the client or landlord record the moment"
+                " their call comes in"
+            ),
+            (
+                "Automatic voice recording & call logging synced straight to"
+                " the property file"
+            ),
+            "Click to dial directly from your CRM / property management portal",
+            (
+                "Never miss an applicant lead — missed calls instantly flagged"
+                " for callback"
+            ),
+        ],
+        "default_cta": (
+            "Let me know roughly how many handsets or softphones you use"
+            " across the team, and I can put together a quick, no-obligation"
+            " quote."
+        ),
     },
     "Dental Practices": {
         "sic_codes": ["86230"],
         "description": "Dental practice activities",
         "search_hint": "Dental Practice",
+        "crms": ["Dentally", "EXACT (SOE)", "Carestream R4"],
+        "primary_hook": "Patient Management System (PMS) Pop & Recall Tracking",
+        "pitch_bullets": [
+            (
+                "Patient record pops on the reception screen the instant the"
+                " phone rings"
+            ),
+            (
+                "Calls and appointment notes log automatically against the"
+                " patient chart"
+            ),
+            (
+                "Missed inbound calls flagged immediately to protect patient"
+                " booking retention"
+            ),
+            (
+                "Call recordings stored securely and compliantly against the"
+                " patient record"
+            ),
+        ],
+        "default_cta": (
+            "How many surgery handsets or reception lines does the practice"
+            " run? I can share a tailored overview and cost comparison."
+        ),
     },
     "Solicitors & Legal Practices": {
         "sic_codes": ["69102"],
         "description": "Solicitors & legal service providers",
         "search_hint": "Solicitors",
+        "crms": ["Clio", "LEAP", "Proclaim", "Actionstep"],
+        "primary_hook": "Matter-Centric Telephony & Fee-Earner Mobility",
+        "pitch_bullets": [
+            (
+                "Dial directly out of active client or matter records in your"
+                " practice management system"
+            ),
+            (
+                "Softphone & mobile apps so fee earners take work calls securely"
+                " anywhere"
+            ),
+            (
+                "Single unified system spanning reception, remote fee earners,"
+                " and all branch offices"
+            ),
+            (
+                "Billable call duration & time tracking logged back to the"
+                " client matter"
+            ),
+        ],
+        "default_cta": (
+            "Let me know which practice management system you run and your"
+            " user count, and I'll send over a breakdown."
+        ),
     },
     "Accountants & Auditors": {
         "sic_codes": ["69201"],
         "description": "Accounting, bookkeeping & tax consultancy",
         "search_hint": "Accountants",
+        "crms": ["Iris", "CCH", "TaxCalc", "Xero Practice Manager"],
+        "primary_hook": "Client Record Pop & Hybrid Advisory Telephony",
+        "pitch_bullets": [
+            "Client identification & contact card pop-up on inbound calls",
+            "Automatic call logging against client tax and audit folders",
+            (
+                "Seamless call transferring between office desk phones and"
+                " laptop softphones"
+            ),
+            (
+                "Consolidated line billing to reduce standard landline rental"
+                " overheads"
+            ),
+        ],
+        "default_cta": (
+            "Drop me a quick note with your team size and I'll send over a"
+            " tailored specification."
+        ),
     },
     "General Medical Clinics": {
         "sic_codes": ["86210"],
         "description": "General medical practice activities",
         "search_hint": "Clinic",
+        "crms": ["EMIS Web", "SystmOne", "Semble", "Heydoc"],
+        "primary_hook": "Clinical Triage & Patient Line Management",
+        "pitch_bullets": [
+            (
+                "Patient record screen-pop to accelerate inbound reception"
+                " triage"
+            ),
+            "Automated call queueing & peak-time patient callback features",
+            "Compliant, encrypted voice recording stored per patient file",
+            (
+                "Direct transfer lines between triage staff, clinicians, and"
+                " administration"
+            ),
+        ],
+        "default_cta": (
+            "Let me know how many lines you operate and I can provide an"
+            " indicative setup plan."
+        ),
     },
 }
 
@@ -141,7 +248,6 @@ class LeadEnricher:
         company_name_includes: Optional[str] = None,
         limit: int = 25,
     ) -> List[Dict[str, Any]]:
-        """Feed active companies by SIC code vertical and location."""
         if not self.ch_api_key:
             return []
 
@@ -186,7 +292,6 @@ class LeadEnricher:
                 return results
         except Exception:
             pass
-
         return []
 
     def get_company_details(self, company_number: str) -> Dict[str, Any]:
@@ -232,7 +337,6 @@ class LeadEnricher:
     def auto_discover_website(
         self, company_name: str, location: Optional[str] = None
     ) -> Optional[str]:
-        """Automatically find the company's official domain via web query."""
         clean_name = re.sub(
             r"\b(LTD|LIMITED|PLC|LLP|GROUP|UK)\b",
             "",
@@ -251,23 +355,21 @@ class LeadEnricher:
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 links = soup.select(".result__url")
-                blocked_domains = [
+                blocked = [
                     "find-and-update.company-information.service.gov.uk",
                     "companieshouse",
-                    "endole.co.uk",
-                    "duedil.com",
-                    "linkedin.com",
-                    "facebook.com",
+                    "endole",
+                    "duedil",
+                    "linkedin",
+                    "facebook",
                     "yell.com",
-                    "checkcompany.co.uk",
-                    "thephonebook.bt.com",
-                    "192.com",
+                    "checkcompany",
                 ]
 
                 for link in links:
                     raw_text = link.get_text().strip()
                     domain = raw_text.split("/")[0].strip()
-                    if domain and not any(b in domain for b in blocked_domains):
+                    if domain and not any(b in domain.lower() for b in blocked):
                         return f"https://{domain}"
         except Exception:
             pass
@@ -313,14 +415,25 @@ class LeadEnricher:
                         description = meta_tag["content"].strip()
 
                 for mailto in soup.select('a[href^="mailto:"]'):
-                    em = mailto["href"].replace("mailto:", "").split("?")[0]
-                    em_clean = em.strip().lower()
-                    if em_clean and "@" in em_clean and "." in em_clean:
+                    em = (
+                        mailto["href"]
+                        .replace("mailto:", "")
+                        .split("?")[0]
+                        .strip()
+                        .lower()
+                    )
+                    if em and "@" in em and "." in em:
                         if not any(
-                            ext in em_clean
-                            for ext in [".png", ".jpg", "sentry.io"]
+                            ext in em
+                            for ext in [
+                                ".png",
+                                ".jpg",
+                                ".webp",
+                                "sentry",
+                                "wixpress",
+                            ]
                         ):
-                            emails.add(em_clean)
+                            emails.add(em)
 
                 for tel in soup.select('a[href^="tel:"]'):
                     ph = tel["href"].replace("tel:", "").strip()
@@ -328,7 +441,6 @@ class LeadEnricher:
                         phones.add(ph)
 
                 page_text = soup.get_text()
-
                 text_emails = re.findall(
                     r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
                     page_text,
@@ -341,8 +453,8 @@ class LeadEnricher:
                             ".png",
                             ".jpg",
                             ".webp",
-                            "wixpress.com",
-                            "sentry.io",
+                            "wixpress",
+                            "sentry",
                         ]
                     ):
                         emails.add(te_clean)
@@ -355,7 +467,6 @@ class LeadEnricher:
                     cleaned = p.strip()
                     if len(cleaned) >= 10:
                         phones.add(cleaned)
-
             except Exception:
                 continue
 
@@ -428,15 +539,156 @@ class LeadEnricher:
 
 
 # ==========================================
-# 3. STREAMLIT APPLICATION
+# 3. PITCH SYNTHESIZER & PDF BUILDER
 # ==========================================
 
-st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
-st.title("🎯 Prospect Feed & Automated Web Discovery")
+def build_email_pitch(lead: ScrapedLead, vertical_key: str) -> str:
+    config = VERTICAL_PRESETS.get(
+        vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
+    )
+    recipient_name = (
+        lead.officers[0].name.split()[0].title()
+        if lead.officers
+        else "Team"
+    )
+    crms_str = " / ".join(config["crms"][:3])
+
+    bullets_text = "\n".join([f"• {b}" for b in config["pitch_bullets"]])
+
+    email_text = f"""Hi {recipient_name},
+
+I hope you're well.
+
+We work with a number of firms across the sector connecting their telephony directly into their core management systems ({crms_str}) so that:
+
+{bullets_text}
+
+{config['default_cta']}
+
+Kind regards,
+Commercial Telephony Solutions"""
+    return email_text
+
+
+class LeadDossierPDF(FPDF):
+
+    def header(self):
+        self.set_fill_color(26, 32, 44)
+        self.rect(0, 0, 210, 16, "F")
+        self.set_text_color(255, 255, 255)
+        self.set_font("Helvetica", "B", 10)
+        self.set_xy(12, 4)
+        self.cell(0, 8, "CONFIDENTIAL TARGET DOSSIER | COMMERCIAL BRIEFING", ln=0)
+        self.ln(16)
+
+    def footer(self):
+        self.set_y(-12)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 8, "Generated for internal sales review", 0, 0, "C")
+
+
+def create_pdf_dossier(
+    lead: ScrapedLead,
+    vertical_name: str,
+    pitch_text: str,
+    target_crms: List[str],
+) -> bytes:
+    pdf = LeadDossierPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Section 1: Firm & Registration Details
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.set_text_color(17, 24, 39)
+    pdf.cell(0, 8, lead.company_name[:45], ln=True)
+
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(75, 85, 99)
+    meta_line = f"Vertical: {vertical_name}  |  Company #{lead.company_number or 'N/A'}  |  SIC: {', '.join(lead.sic_codes) or 'Active'}"
+    pdf.cell(0, 6, meta_line, ln=True)
+
+    if lead.registered_address:
+        pdf.cell(
+            0,
+            6,
+            f"Registered Office: {lead.registered_address[:80]}",
+            ln=True,
+        )
+    if lead.website_url:
+        pdf.cell(0, 6, f"Website: {lead.website_url}", ln=True)
+
+    pdf.ln(4)
+    pdf.set_draw_color(229, 231, 235)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(6)
+
+    # Section 2: Key Contacts & Officers
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(31, 41, 55)
+    pdf.cell(0, 6, "PRIMARY CONTACTS & REGISTRY OFFICERS", ln=True)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(55, 65, 81)
+    if lead.officers:
+        for off in lead.officers[:4]:
+            pdf.cell(
+                0,
+                5,
+                f"- {off.name} ({off.role}) - Appointed: {off.appointed_on or 'N/A'}",
+                ln=True,
+            )
+    else:
+        pdf.cell(0, 5, "- No registered officers returned via API", ln=True)
+
+    pdf.ln(2)
+    emails_str = ", ".join(lead.emails_found) if lead.emails_found else "None"
+    phones_str = ", ".join(lead.phones_found) if lead.phones_found else "None"
+    pdf.cell(0, 5, f"Discovered Email(s): {emails_str}", ln=True)
+    pdf.cell(0, 5, f"Discovered Phone(s): {phones_str}", ln=True)
+
+    pdf.ln(4)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(6)
+
+    # Section 3: Sector CRM Target & Angles
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 6, "SECTOR INTEGRATION HOOK", ln=True)
+
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(
+        0, 5, f"Typical Sector CRMs/PMS: {', '.join(target_crms)}", ln=True
+    )
+    pdf.ln(4)
+
+    # Section 4: Tailored Outreach Pitch Draft
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 6, "TAILORED OUTREACH EMAIL DRAFT", ln=True)
+
+    pdf.set_fill_color(248, 250, 252)
+    pdf.set_draw_color(203, 213, 225)
+    pdf.set_font("Courier", "", 8.5)
+    pdf.set_text_color(15, 23, 42)
+
+    # Output draft in styled text block
+    pdf.multi_cell(190, 4.5, pitch_text, border=1, fill=True)
+
+    return pdf.output()
+
+
+# ==========================================
+# 4. STREAMLIT APPLICATION
+# ==========================================
+
+st.set_page_config(
+    page_title="Prospect Discovery & Dossier Engine", layout="wide"
+)
+
+st.title("🎯 Prospect Discovery & Dossier Generator")
 st.caption(
-    "Query the Companies House registry, then click any row in the table to"
-    " enrich contacts."
+    "Source active UK companies, enrich contact channels, and generate"
+    " sector-tailored pitches and PDF briefings."
 )
 
 default_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
@@ -454,12 +706,13 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.markdown("**Automated Pipeline:**")
+    st.markdown("**Workflow:**")
     st.markdown("1. Search Active UK entities by SIC.")
     st.markdown("2. Click any table row to select.")
-    st.markdown("3. Auto-find domain & scrape direct contact points.")
+    st.markdown("3. Auto-find domain & scrape contact info.")
+    st.markdown("4. Review sector pitch & export PDF.")
 
-col_left, col_right = st.columns([1.1, 0.9])
+col_left, col_right = st.columns([1.05, 0.95])
 
 with col_left:
     st.subheader("Step 1: Pick Vertical & Location")
@@ -475,7 +728,7 @@ with col_left:
     with f_col1:
         location_input = st.text_input(
             "Town, City, or County (Recommended)",
-            placeholder="e.g. Manchester, Chester, Birmingham",
+            placeholder="e.g. Manchester, Walsall, Birmingham",
         )
     with f_col2:
         keyword_filter = st.text_input(
@@ -499,13 +752,11 @@ with col_left:
                 )
                 st.session_state["discovered_leads"] = leads_list
                 st.session_state["active_vertical_name"] = selected_vertical_name
-                # Reset any previous row selection
                 st.session_state["selected_lead_row"] = None
 
-    # Step 2: Select & Auto-Enrich via Direct Table Click
     if st.session_state.get("discovered_leads"):
         st.write("---")
-        st.subheader("Step 2: Click a Row to Select Target")
+        st.subheader("Step 2: Select Target Firm")
         st.caption(
             "👉 Click anywhere on a company row below to select it for"
             " enrichment."
@@ -514,7 +765,6 @@ with col_left:
         leads_data = st.session_state["discovered_leads"]
         df = pd.DataFrame(leads_data)
 
-        # Native interactive row selection table
         table_event = st.dataframe(
             df,
             use_container_width=True,
@@ -523,7 +773,6 @@ with col_left:
             on_select="rerun",
         )
 
-        # Check if user clicked a row in the table
         selected_rows = table_event.selection.rows if table_event else []
 
         if selected_rows:
@@ -532,7 +781,6 @@ with col_left:
             "selected_lead_row" not in st.session_state
             or not st.session_state["selected_lead_row"]
         ):
-            # Default to the first row if nothing selected yet
             st.session_state["selected_lead_row"] = leads_data[0]
 
         target_row = st.session_state["selected_lead_row"]
@@ -545,7 +793,7 @@ with col_left:
 
         website_override = st.text_input(
             "Website URL (Optional — leave blank to auto-discover):",
-            placeholder="e.g. example.co.uk",
+            placeholder="e.g. hartnewhomes.co.uk",
         )
 
         enrich_btn = st.button(
@@ -557,7 +805,7 @@ with col_left:
             with st.spinner("Finding commercial website & scraping contact channels..."):
                 enricher = LeadEnricher(ch_api_key=ch_api_key)
                 current_vertical = st.session_state.get(
-                    "active_vertical_name", "General B2B"
+                    "active_vertical_name", "Estate & Lettings Agents"
                 )
                 enriched_lead = enricher.enrich_selected_company(
                     company_number=target_row["Company Number"],
@@ -565,65 +813,111 @@ with col_left:
                     manual_website=website_override,
                 )
                 st.session_state["current_lead"] = enriched_lead
+                # Reset any custom pitch edits for new lead
+                st.session_state.pop("custom_pitch_text", None)
 
 with col_right:
-    st.subheader("Step 3: Enriched Lead Dossier")
+    st.subheader("Step 3: Enriched Dossier & Pitch")
 
     if "current_lead" in st.session_state:
         lead: ScrapedLead = st.session_state["current_lead"]
-
-        b1, b2, b3 = st.columns(3)
-        b1.metric("Vertical", lead.sector_guess.split("/")[0])
-        b2.metric("Company #", lead.company_number or "N/A")
-        b3.metric(
-            "SIC Code",
-            ", ".join(lead.sic_codes) if lead.sic_codes else "Active",
+        current_vert_name = st.session_state.get(
+            "active_vertical_name", "Estate & Lettings Agents"
         )
+        vert_cfg = VERTICAL_PRESETS[current_vert_name]
 
-        st.markdown(f"### {lead.company_name}")
-        st.markdown(
-            f"📍 **Registered Office:** {lead.registered_address or 'Not listed'}"
-        )
+        tab1, tab2 = st.tabs(["📋 Lead Card & Angles", "✉️ Email Pitch & PDF"])
 
-        if lead.website_url:
-            st.markdown(f"🌐 **Discovered Website:** [{lead.website_url}]({lead.website_url})")
-        else:
-            st.warning("⚠️ Commercial website could not be automatically resolved. You can paste it in the override box on the left.")
+        with tab1:
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Vertical", current_vert_name.split("/")[0])
+            b2.metric("Company #", lead.company_number or "N/A")
+            b3.metric(
+                "SIC Code",
+                ", ".join(lead.sic_codes) if lead.sic_codes else "Active",
+            )
 
-        if lead.site_meta_description:
-            st.info(f"**Site Summary:** {lead.site_meta_description}")
+            st.markdown(f"### {lead.company_name}")
+            st.markdown(
+                f"📍 **Registered Office:** {lead.registered_address or 'Not listed'}"
+            )
 
-        st.write("---")
-        st.markdown("#### Primary Decision Makers (Active Officers)")
-        if lead.officers:
-            for off in lead.officers:
-                st.markdown(
-                    f"- **{off.name}** — *{off.role}* (Appointed:"
-                    f" {off.appointed_on or 'N/A'})"
+            if lead.website_url:
+                st.markdown(f"🌐 **Website:** [{lead.website_url}]({lead.website_url})")
+
+            if lead.site_meta_description:
+                st.info(f"**Site Summary:** {lead.site_meta_description}")
+
+            st.markdown("#### Primary Decision Makers (Active Officers)")
+            if lead.officers:
+                for off in lead.officers:
+                    st.markdown(
+                        f"- **{off.name}** — *{off.role}* (Appointed:"
+                        f" {off.appointed_on or 'N/A'})"
+                    )
+            else:
+                st.caption("No registered officers returned by API.")
+
+            st.markdown("#### Discovered Channels")
+            emails_display = (
+                ", ".join([f"`{e}`" for e in lead.emails_found])
+                if lead.emails_found
+                else "*None detected*"
+            )
+            phones_display = (
+                ", ".join([f"`{p}`" for p in lead.phones_found])
+                if lead.phones_found
+                else "*None detected*"
+            )
+            st.markdown(f"**Emails:** {emails_display}")
+            st.markdown(f"**Phones:** {phones_display}")
+
+            st.write("---")
+            st.markdown(f"**Target Sector CRMs / PMS:**")
+            st.markdown(f"`{'`  •  `'.join(vert_cfg['crms'])}`")
+            st.markdown(f"**Core Hook Angle:** {vert_cfg['primary_hook']}")
+
+        with tab2:
+            st.markdown("#### Outreach Email Draft")
+            st.caption(
+                "Tweak the draft below if needed before downloading the dossier"
+                " or copying to your clipboard."
+            )
+
+            if "custom_pitch_text" not in st.session_state:
+                st.session_state["custom_pitch_text"] = build_email_pitch(
+                    lead, current_vert_name
                 )
-        else:
-            st.caption("No registered officers returned by API.")
 
-        st.write("---")
-        st.markdown("#### Scraped Contact Channels")
+            edited_pitch = st.text_area(
+                "Email Body",
+                value=st.session_state["custom_pitch_text"],
+                height=260,
+            )
+            st.session_state["custom_pitch_text"] = edited_pitch
 
-        if lead.emails_found:
-            st.markdown("**Discovered Inboxes:**")
-            for em in lead.emails_found:
-                st.markdown(f"- ✉️ `{em}`")
-        else:
-            st.markdown("**Emails:** *None found on crawled pages*")
+            # Generate PDF in memory
+            pdf_bytes = create_pdf_dossier(
+                lead=lead,
+                vertical_name=current_vert_name,
+                pitch_text=edited_pitch,
+                target_crms=vert_cfg["crms"],
+            )
 
-        if lead.phones_found:
-            st.markdown("**Discovered Telephones:**")
-            for ph in lead.phones_found:
-                st.markdown(f"- 📞 `{ph}`")
-        else:
-            st.markdown("**Phones:** *None found on crawled pages*")
+            d_col1, d_col2 = st.columns(2)
+            with d_col1:
+                clean_filename = f"dossier_{re.sub(r'[^a-zA-Z0-9]', '_', lead.company_name).lower()}.pdf"
+                st.download_button(
+                    label="📄 Download PDF Dossier",
+                    data=bytes(pdf_bytes),
+                    file_name=clean_filename,
+                    mime="application/pdf",
+                    type="primary",
+                )
+            with d_col2:
+                st.caption(
+                    "Ready to copy and paste for manual review or dispatch."
+                )
 
-        st.write("---")
-        st.success(
-            "Profile ready. Next: Connect LLM Pitch & Dossier PDF Builder."
-        )
     else:
-        st.info("Click any company row in the table to enrich its profile.")
+        st.info("Select a company from the feed to run automated discovery.")
