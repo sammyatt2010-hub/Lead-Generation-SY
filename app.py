@@ -808,6 +808,54 @@ def _describe_ch_error(resp: requests.Response) -> str:
 
 
 
+# What each sector looks like on Google Maps (place types) and in business names
+SECTOR_PLACE_RULES: Dict[str, Dict[str, Any]] = {
+    "Estate & Lettings Agents": {
+        "types": {"real_estate_agency"},
+        "words": ("estate", "letting", "lettings", "lets", "property", "properties", "homes",
+                  "residential", "realty", "agents", "sales"),
+    },
+    "Dental Practices": {
+        "types": {"dentist", "dental_clinic"},
+        "words": ("dental", "dentist", "dentistry", "orthodont", "smile", "teeth", "implant"),
+    },
+    "Solicitors & Legal Practices": {
+        "types": {"lawyer"},
+        "words": ("solicitor", "solicitors", "law", "legal", "lawyers", "conveyancing", "notary"),
+    },
+    "Accountants & Auditors": {
+        "types": {"accounting"},
+        "words": ("accountant", "accountants", "accounting", "accountancy", "tax", "bookkeeping",
+                  "audit", "payroll", "chartered"),
+    },
+    "General Medical Clinics": {
+        "types": {"doctor", "medical_clinic", "medical_center", "hospital", "general_hospital",
+                  "physiotherapist", "health"},
+        "words": ("clinic", "medical", "health", "surgery", "doctor", "gp", "physio", "practice"),
+    },
+}
+GENERIC_PLACE_TYPES = {"point_of_interest", "establishment", "store", "service", "business"}
+
+
+def sector_fit(place: Dict[str, Any], rules: Dict[str, Any]) -> Optional[bool]:
+    """True = Google lists it as this sector; False = clearly a different business
+    (e.g. a locksmith when we want estate agents); None = can't tell."""
+    if not rules:
+        return None
+    types = set(place.get("types") or [])
+    if place.get("primaryType"):
+        types.add(place["primaryType"])
+    if types & rules["types"]:
+        return True
+    specific = types - GENERIC_PLACE_TYPES
+    if not specific:
+        return None  # Google only says "business", so don't judge
+    name = ((place.get("displayName") or {}).get("text") or "").lower()
+    if any(w in name for w in rules["words"]):
+        return None  # Name says it's in the sector even if Google's category differs
+    return False
+
+
 class LeadEnricher:
 
     def __init__(self, ch_api_key: Optional[str] = None):
@@ -1068,10 +1116,12 @@ class LeadEnricher:
     PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
     PLACES_FIELDS = (
         "places.displayName,places.websiteUri,places.nationalPhoneNumber,"
-        "places.formattedAddress,places.businessStatus"
+        "places.formattedAddress,places.businessStatus,"
+        "places.types,places.primaryType,places.primaryTypeDisplayName"
     )
 
-    def places_lookup(self, company_name: str, town: Optional[str]) -> Optional[Dict[str, str]]:
+    def places_lookup(self, company_name: str, town: Optional[str],
+                      vertical: Optional[str] = None) -> Optional[Dict[str, str]]:
         """Finds the firm on Google Maps. Returns {name, website, phone, address} or None.
         Only runs when GOOGLE_PLACES_API_KEY is set in Secrets (1 billable lookup per firm)."""
         self.last_places_note = None
@@ -1104,9 +1154,17 @@ class LeadEnricher:
 
         tokens = distinctive_name_tokens(company_name)
         key_tokens = [t for t in tokens if len(t) >= 3] or tokens
+        rules = SECTOR_PLACE_RULES.get(vertical or "", {})
         best, best_score = None, 0.0
+        wrong_sector: List[str] = []
         for place in resp.json().get("places", []) or []:
             if place.get("businessStatus") == "CLOSED_PERMANENTLY":
+                continue
+            fit = sector_fit(place, rules)
+            if fit is False:  # Google lists it as a different kind of business
+                label = ((place.get("primaryTypeDisplayName") or {}).get("text")
+                         or (place.get("primaryType") or "other business").replace("_", " "))
+                wrong_sector.append(f"'{(place.get('displayName') or {}).get('text', '')}' ({label.lower()})")
                 continue
             name = (place.get("displayName") or {}).get("text", "")
             words = re.sub(r"[^a-z0-9 ]", " ", name.lower().replace("&", " and ")).split()
@@ -1116,10 +1174,15 @@ class LeadEnricher:
             web_label = domain_label(domain_of(place.get("websiteUri", "")) or "")
             if web_label and any(len(t) >= 4 and t in web_label for t in key_tokens):
                 score += 0.5
+            if fit is True:
+                score += 0.25  # Right kind of business: extra confidence
             if score > best_score:
                 best, best_score = place, score
         if not best or best_score < 0.5:
-            self.last_places_note = "Google Maps: no listing confidently matched this company"
+            self.last_places_note = (
+                "Google Maps: ignored " + ", ".join(wrong_sector[:2]) + " (wrong type of business)"
+                if wrong_sector else "Google Maps: no listing confidently matched this company"
+            )
             return None
         found = {
             "name": (best.get("displayName") or {}).get("text", ""),
@@ -1345,7 +1408,7 @@ class LeadEnricher:
         postcode = address_dict.get("postal_code")
 
         officers = self.get_officers(company_number)
-        places = self.places_lookup(company_name, town or postcode)  # None unless a Places key is set
+        places = self.places_lookup(company_name, town or postcode, sector_name)  # None unless a Places key is set
         trading_name = places["name"] if places and places.get("name") else None
 
         target_website = manual_website.strip() if manual_website else None
