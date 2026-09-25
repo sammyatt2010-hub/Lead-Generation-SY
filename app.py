@@ -559,6 +559,7 @@ class ScrapedLead(BaseModel):
     emails_found: List[str] = Field(default_factory=list)
     officers: List[OfficerInfo] = Field(default_factory=list)
     site_meta_description: Optional[str] = None
+    trading_name: Optional[str] = None  # From Google Maps, e.g. "J Dent Dental Care"
     website_confidence: Optional[str] = None  # High / Medium / Low / Manual
     website_reasons: List[str] = Field(default_factory=list)
     discovery_notes: List[str] = Field(default_factory=list)
@@ -1060,14 +1061,86 @@ class LeadEnricher:
             reasons.append(f"mentions {town}")
         return score, reasons
 
+    # ------------------------------------------------------------------
+    # GOOGLE PLACES (trading name, real website & main phone number)
+    # ------------------------------------------------------------------
+
+    PLACES_URL = "https://places.googleapis.com/v1/places:searchText"
+    PLACES_FIELDS = (
+        "places.displayName,places.websiteUri,places.nationalPhoneNumber,"
+        "places.formattedAddress,places.businessStatus"
+    )
+
+    def places_lookup(self, company_name: str, town: Optional[str]) -> Optional[Dict[str, str]]:
+        """Finds the firm on Google Maps. Returns {name, website, phone, address} or None.
+        Only runs when GOOGLE_PLACES_API_KEY is set in Secrets (1 billable lookup per firm)."""
+        self.last_places_note = None
+        key = _secret_value("GOOGLE_PLACES_API_KEY")
+        if not key:
+            return None
+        clean = " ".join(w for w in re.sub(r"[^\w&' ]", " ", company_name).split()
+                         if w.upper() not in LEGAL_SUFFIX_WORDS)
+        body = {
+            "textQuery": f"{clean} {town or ''}".strip(),
+            "regionCode": "GB",
+            "languageCode": "en-GB",
+            "pageSize": 5,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": key,
+            "X-Goog-FieldMask": self.PLACES_FIELDS,
+        }
+        try:
+            resp = requests.post(self.PLACES_URL, json=body, headers=headers, timeout=8)
+        except requests.exceptions.RequestException as exc:
+            self.last_places_note = f"Google Maps lookup failed ({exc.__class__.__name__})"
+            return None
+        if resp.status_code != 200:
+            hint = {400: "check the request", 403: "API key not allowed. Enable Places API (New) and billing",
+                    429: "quota reached"}.get(resp.status_code, "")
+            self.last_places_note = f"Google Maps lookup failed ({resp.status_code}{': ' + hint if hint else ''})"
+            return None
+
+        tokens = distinctive_name_tokens(company_name)
+        key_tokens = [t for t in tokens if len(t) >= 3] or tokens
+        best, best_score = None, 0.0
+        for place in resp.json().get("places", []) or []:
+            if place.get("businessStatus") == "CLOSED_PERMANENTLY":
+                continue
+            name = (place.get("displayName") or {}).get("text", "")
+            words = re.sub(r"[^a-z0-9 ]", " ", name.lower().replace("&", " and ")).split()
+            compact = "".join(words)
+            hits = [t for t in key_tokens if t in words or (len(t) >= 4 and t in compact)]
+            score = len(hits) / max(1, len(key_tokens))
+            web_label = domain_label(domain_of(place.get("websiteUri", "")) or "")
+            if web_label and any(len(t) >= 4 and t in web_label for t in key_tokens):
+                score += 0.5
+            if score > best_score:
+                best, best_score = place, score
+        if not best or best_score < 0.5:
+            self.last_places_note = "Google Maps: no listing confidently matched this company"
+            return None
+        found = {
+            "name": (best.get("displayName") or {}).get("text", ""),
+            "website": best.get("websiteUri", ""),
+            "phone": normalise_uk_phone(best.get("nationalPhoneNumber", "")) or "",
+            "address": best.get("formattedAddress", ""),
+        }
+        self.last_places_note = f"Google Maps: matched '{found['name']}'"
+        return found
+
     def auto_discover_website(
         self,
         company_name: str,
         location: Optional[str] = None,
         company_number: Optional[str] = None,
         postcode: Optional[str] = None,
+        places_website: Optional[str] = None,
+        trading_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Finds the firm's own website. Returns url, confidence, reasons and notes."""
+        places_domain = domain_of(places_website) if places_website else None
         notes: List[str] = []
         clean_name = " ".join(w for w in re.sub(r"[^\w&' ]", " ", company_name).split()
                               if w.upper() not in LEGAL_SUFFIX_WORDS)
@@ -1091,9 +1164,12 @@ class LeadEnricher:
         candidates = candidates[:6]
 
         # B. Domain guesses (works even when search engines block us)
-        for guess in guess_domains(company_name):
+        for guess in guess_domains(company_name) + (guess_domains(trading_name) if trading_name else []):
             if guess not in candidates:
                 candidates.append(guess)
+        # The Google Maps listing's own website goes first
+        if places_domain and not is_blocked_domain(places_domain):
+            candidates = [places_domain] + [c for c in candidates if c != places_domain]
 
         # C. Fetch & score candidates in parallel
         def check(domain: str):
@@ -1107,6 +1183,15 @@ class LeadEnricher:
             score, reasons = self._score_candidate(
                 final_domain, html, company_name, company_number, postcode, location
             )
+            if trading_name:
+                t_score, t_reasons = self._score_candidate(
+                    final_domain, html, trading_name, company_number, postcode, location
+                )
+                if t_score > score:
+                    score, reasons = t_score, t_reasons
+            if places_domain and final_domain in (places_domain, "www." + places_domain):
+                score += 35
+                reasons = ["website on the firm's Google Maps listing"] + reasons
             return final_url, final_domain, score, reasons
 
         results = []
@@ -1116,6 +1201,11 @@ class LeadEnricher:
                     results.append(res)
 
         if not results:
+            if places_website and places_domain and not is_blocked_domain(places_domain):
+                notes.append("Website didn't respond to us, but it's on the firm's Google Maps listing")
+                parsed_p = urlparse(places_website if "://" in places_website else "https://" + places_website)
+                return {"url": f"{parsed_p.scheme}://{parsed_p.netloc}", "confidence": "Medium",
+                        "reasons": ["website on the firm's Google Maps listing"], "notes": notes}
             notes.append("No candidate website responded")
             return {"url": None, "confidence": None, "reasons": [], "notes": notes}
 
@@ -1255,6 +1345,8 @@ class LeadEnricher:
         postcode = address_dict.get("postal_code")
 
         officers = self.get_officers(company_number)
+        places = self.places_lookup(company_name, town or postcode)  # None unless a Places key is set
+        trading_name = places["name"] if places and places.get("name") else None
 
         target_website = manual_website.strip() if manual_website else None
         discovery: Dict[str, Any] = {"confidence": "Manual", "reasons": ["entered by you"], "notes": []}
@@ -1264,6 +1356,8 @@ class LeadEnricher:
                 location=town or postcode,
                 company_number=company_number,
                 postcode=postcode,
+                places_website=places.get("website") if places else None,
+                trading_name=trading_name,
             )
             target_website = discovery.get("url")
 
@@ -1274,6 +1368,11 @@ class LeadEnricher:
                   "resolved_url": None, "pages_checked": []}
         )
         notes = list(discovery.get("notes", []))
+        if getattr(self, "last_places_note", None):
+            notes.insert(0, self.last_places_note)
+        phones = list(site_contacts["phones"])
+        if places and places.get("phone"):  # Google's listed number is usually the main switchboard
+            phones = [places["phone"]] + [p for p in phones if p != places["phone"]]
         if getattr(self, "last_officer_error", None):
             notes.append(self.last_officer_error)
         if target_website and not site_contacts.get("pages_checked"):
@@ -1286,8 +1385,9 @@ class LeadEnricher:
             sector_guess=sector_name,
             registered_address=registered_address,
             website_url=site_contacts.get("resolved_url") or target_website,
-            phones_found=site_contacts["phones"],
+            phones_found=phones,
             emails_found=site_contacts["emails"],
+            trading_name=trading_name,
             officers=officers,
             site_meta_description=site_contacts["description"],
             website_confidence=discovery.get("confidence") if target_website else None,
@@ -1597,6 +1697,14 @@ def friendly_company_name(legal_name: str) -> str:
     return name.replace(" And ", " and ").replace(" Of ", " of ").replace(" The ", " the ")
 
 
+def lead_display_name(lead: "ScrapedLead") -> str:
+    """The name the firm actually trades under (Google Maps) if known, else a tidied legal name."""
+    trading = (getattr(lead, "trading_name", None) or "").strip()
+    if trading and len(trading) <= 60:
+        return trading
+    return friendly_company_name(lead.company_name)
+
+
 def get_sender() -> Dict[str, str]:
     sender = dict(SENDER_DEFAULTS)
     sender.update({k: v for k, v in st.session_state.get("sender_profile", {}).items() if v})
@@ -1622,7 +1730,7 @@ def build_signature(sender: Dict[str, str]) -> str:
 def build_email_subject(lead: ScrapedLead, vertical_key: str) -> str:
     copy = SECTOR_COPY.get(vertical_key, SECTOR_COPY["Estate & Lettings Agents"])
     crms = VERTICAL_PRESETS.get(vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"])["crms"]
-    return copy["subject"].format(company=friendly_company_name(lead.company_name), crm1=crms[0])
+    return copy["subject"].format(company=lead_display_name(lead), crm1=crms[0])
 
 
 def build_email_pitch(
@@ -1636,7 +1744,7 @@ def build_email_pitch(
     sender = get_sender()
     first_name, _ = infer_contact_name_and_role(lead, vertical_key)
     greeting_name = first_name if first_name != config["fallback_greeting"] else "there"
-    company = friendly_company_name(lead.company_name)
+    company = lead_display_name(lead)
     crms = config["crms"]
     crms_str = ", ".join(crms[:2]) + f" or {crms[2]}" if len(crms) >= 3 else " or ".join(crms)
 
@@ -1784,7 +1892,7 @@ def create_sector_overview_pdf(lead: Optional[ScrapedLead], vertical_key: str) -
         pdf.set_xy(132, 19)
         pdf.set_font("Helvetica", "B", 10.5)
         pdf.set_text_color(255, 255, 255)
-        pdf.multi_cell(61, 4.6, T(friendly_company_name(lead.company_name)[:60]), align="L")
+        pdf.multi_cell(61, 4.6, T(lead_display_name(lead)[:60]), align="L")
         pdf.set_xy(132, 30.5)
         pdf.set_font("Helvetica", "", 7.5)
         pdf.set_text_color(190, 184, 230)
@@ -2283,6 +2391,7 @@ def build_lead_list_csv(items: List[Dict[str, Any]], log: Dict[str, Any]) -> byt
             "Status": (f"{rec.get('status') or 'Emailed'} {sent_label(rec)[2:]}" if rec
                        else "Ready to email" if item.get("to") else "No email"),
             "Firm": lead.company_name,
+            "Trading name": getattr(lead, "trading_name", None) or "",
             "Company number": cn,
             "Sector": item["vertical"],
             "Contact": contact,
@@ -2310,7 +2419,7 @@ def build_drafts_zip(items: List[Dict[str, Any]], attach_overview: bool) -> Tupl
         for item in items:
             lead: ScrapedLead = item["lead"]
             if not item.get("to"):
-                skipped.append(friendly_company_name(lead.company_name))
+                skipped.append(lead_display_name(lead))
                 continue
             written += 1
             part = draft_filename_part(lead.company_name)
@@ -2449,6 +2558,59 @@ def add_to_queue(lead: ScrapedLead, vertical: str) -> None:
     bump_queue_editor()
 
 
+def run_enrichment(
+    rows: List[Dict[str, Any]],
+    vertical: str,
+    manual_websites: Optional[Dict[str, str]] = None,
+) -> None:
+    """Enriches firms 4 at a time with a progress bar and adds them to the review queue.
+    rows need 'Company Number' and 'Company Name'. manual_websites: {company_number: url}."""
+    manual_websites = manual_websites or {}
+    progress = st.progress(0.0, text="Starting enrichment…")
+
+    def _enrich(row: Dict[str, Any]) -> ScrapedLead:
+        return LeadEnricher(ch_api_key=ch_api_key).enrich_selected_company(
+            company_number=row["Company Number"],
+            sector_name=vertical,
+            manual_website=manual_websites.get(row["Company Number"]) or None,
+        )
+
+    results: Dict[str, ScrapedLead] = {}
+    failures: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(rows))) as pool:
+        futures = {pool.submit(_enrich, row): row for row in rows}
+        for done, fut in enumerate(as_completed(futures), start=1):
+            row = futures[fut]
+            try:
+                results[row["Company Number"]] = fut.result()
+            except Exception:
+                failures.append(friendly_company_name(row["Company Name"]))
+            progress.progress(
+                done / len(rows),
+                text=f"Enriched {done} of {len(rows)} · {friendly_company_name(row['Company Name'])}",
+            )
+    progress.empty()
+
+    first_cn = None
+    for row in rows:  # Keep the table's order in the queue
+        cn = row["Company Number"]
+        if cn in results:
+            add_to_queue(results[cn], vertical)
+            first_cn = first_cn or cn
+    if first_cn:
+        st.session_state["current_cn"] = first_cn
+        st.session_state["current_cn_select"] = first_cn
+    st.session_state["stat_dossiers"] += len(results)
+    if failures:
+        st.warning("Couldn't enrich: " + ", ".join(failures))
+    if len(rows) > 1 and results:
+        with_email = sum(1 for cn in results if results[cn].emails_found)
+        st.success(
+            f"{len(results)} firms enriched: {with_email} with an email address,"
+            f" {len(results) - with_email} without. See Review & send below."
+        )
+
+
 def ensure_draft(item: Dict[str, Any]) -> None:
     """(Re)builds a firm's subject/body when first needed or when options/signature change."""
     sig = (item["vertical"], st.session_state["opt_attach"], st.session_state["opt_switch"],
@@ -2511,6 +2673,8 @@ with st.sidebar:
     else:
         log_state = 'idle">Temporary'
     render_html(f'<div class="pe-status">Sent log<span class="st {log_state}</span></div>')
+    places_state = 'ok">Connected' if _secret_value("GOOGLE_PLACES_API_KEY") else 'idle">Not set up'
+    render_html(f'<div class="pe-status">Google Maps lookup<span class="st {places_state}</span></div>')
     if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
         st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
     elif SENT_LOG.backend == "local":
@@ -2645,11 +2809,24 @@ with col_left:
             selected = [leads_data[i] for i in selected_rows]
             st.session_state["selected_rows_data"] = selected
 
+            batch_to_run: List[Dict[str, Any]] = []
+            website_override = ""
             if not selected:
                 render_html(
                     f'<div class="pe-hint">{icon("pointer", 16)}'
-                    "Tick one firm, or several to build a batch. Click a column header to sort.</div>"
+                    "Tick one firm, or several to build a batch. Or enrich every result in one go.</div>"
                 )
+                n_all = min(len(leads_data), MAX_BATCH)
+                fresh = [r for r in leads_data if r["Company Number"] not in log_now and r["Company Number"] not in st.session_state.get("queue", {})]
+                if st.button(
+                    f"⚡ Enrich all {min(len(fresh), MAX_BATCH)} new results"
+                    + (f" (skips {len(leads_data) - len(fresh)} already contacted or queued)" if len(fresh) < len(leads_data) else ""),
+                    type="primary", disabled=not fresh, **FULL_WIDTH,
+                    help=f"Finds contacts for every firm in the list (up to {MAX_BATCH} at a time), then sorts them into Ready to email / No email below.",
+                ):
+                    batch_to_run = fresh[:MAX_BATCH]
+                if len(fresh) > MAX_BATCH:
+                    st.caption(f"The first {MAX_BATCH} will be enriched. Run it again for the next {MAX_BATCH}.")
             else:
                 n_sel = len(selected)
                 names = ", ".join(esc(friendly_company_name(r["Company Name"])) for r in selected[:3])
@@ -2672,7 +2849,6 @@ with col_left:
                 if n_sel > MAX_BATCH:
                     st.warning(f"Batches are capped at {MAX_BATCH} firms. Only the first {MAX_BATCH} will be enriched.")
 
-                website_override = ""
                 if n_sel == 1:
                     e_col1, e_col2 = columns([1.6, 1])
                     with e_col1:
@@ -2680,54 +2856,18 @@ with col_left:
                             "Website (optional)", placeholder="Leave blank to auto-discover",
                         )
                     with e_col2:
-                        enrich_btn = st.button("Enrich & build dossier", type="primary", **FULL_WIDTH)
+                        if st.button("Enrich & build dossier", type="primary", **FULL_WIDTH):
+                            batch_to_run = selected[:1]
                 else:
-                    enrich_btn = st.button(
-                        f"Enrich {min(n_sel, MAX_BATCH)} firms & add to review queue", type="primary", **FULL_WIDTH
-                    )
+                    if st.button(f"Enrich {min(n_sel, MAX_BATCH)} firms & add to review", type="primary", **FULL_WIDTH):
+                        batch_to_run = selected[:MAX_BATCH]
 
-                if enrich_btn:
-                    batch = selected[:MAX_BATCH]
-                    vertical_now = st.session_state.get("active_vertical_name", "Estate & Lettings Agents")
-                    progress = st.progress(0.0, text="Starting enrichment…")
-
-                    def _enrich(row: Dict[str, Any]) -> ScrapedLead:
-                        return LeadEnricher(ch_api_key=ch_api_key).enrich_selected_company(
-                            company_number=row["Company Number"],
-                            sector_name=vertical_now,
-                            manual_website=website_override if len(batch) == 1 else None,
-                        )
-
-                    results: Dict[str, ScrapedLead] = {}
-                    failures: List[str] = []
-                    with ThreadPoolExecutor(max_workers=min(4, len(batch))) as pool:
-                        futures = {pool.submit(_enrich, row): row for row in batch}
-                        for done, fut in enumerate(as_completed(futures), start=1):
-                            row = futures[fut]
-                            try:
-                                results[row["Company Number"]] = fut.result()
-                            except Exception:
-                                failures.append(friendly_company_name(row["Company Name"]))
-                            progress.progress(
-                                done / len(batch),
-                                text=f"Enriched {done} of {len(batch)} · {friendly_company_name(row['Company Name'])}",
-                            )
-                    progress.empty()
-
-                    first_cn = None
-                    for row in batch:  # Keep the table's order in the queue
-                        cn = row["Company Number"]
-                        if cn in results:
-                            add_to_queue(results[cn], vertical_now)
-                            first_cn = first_cn or cn
-                    if first_cn:
-                        st.session_state["current_cn"] = first_cn
-                        st.session_state["current_cn_select"] = first_cn
-                    st.session_state["stat_dossiers"] += len(results)
-                    if failures:
-                        st.warning("Couldn't enrich: " + ", ".join(failures))
-                    if len(batch) > 1 and results:
-                        st.success(f"{len(results)} firms added to the review queue below.")
+            if batch_to_run:
+                vertical_now = st.session_state.get("active_vertical_name", "Estate & Lettings Agents")
+                run_enrichment(
+                    batch_to_run, vertical_now,
+                    manual_websites={batch_to_run[0]["Company Number"]: website_override} if website_override else None,
+                )
 
 
 # ---------------- Right: Dossier ----------------
@@ -2758,7 +2898,7 @@ with col_right:
                     f"Viewing firm ({len(queue_order)} in queue)",
                     options=queue_order,
                     key="current_cn_select",
-                    format_func=lambda c: ("✓ " if c in log_now else "") + friendly_company_name(queue[c]["lead"].company_name),
+                    format_func=lambda c: ("✓ " if c in log_now else "") + lead_display_name(queue[c]["lead"]),
                 )
                 st.session_state["current_cn"] = st.session_state["current_cn_select"]
             cn = st.session_state["current_cn"]
@@ -2972,180 +3112,235 @@ with col_right:
 
 
 # ---------------- Review queue (full width) ----------------
+def _data_editor(df: pd.DataFrame, **kwargs):
+    try:
+        return st.data_editor(df, width="stretch", **kwargs)
+    except Exception:
+        return st.data_editor(df, use_container_width=True, **kwargs)
+
+
+def _website_label(lead: ScrapedLead) -> str:
+    return (lead.website_confidence or "Not found") if lead.website_url else "Not found"
+
+
+def _mark_handled_popover(ids: List[str], label_noun: str, key: str) -> None:
+    pop_kwargs = dict(disabled=not ids, **FULL_WIDTH)
+    label = f"✅  Mark {len(ids)} as handled"
+    try:  # A fresh key after each save closes the pop-up
+        pop = st.popover(label, key=f"{key}_{st.session_state.get('sent_log_ver', 0)}", **pop_kwargs)
+    except TypeError:
+        pop = st.popover(label, **pop_kwargs)
+    with pop:
+        st.markdown(f"Mark **{len(ids)} selected {label_noun}** as handled?")
+        st.caption("They'll show as contacted in future searches. You can untick any of them afterwards.")
+        if st.button("Yes, mark as handled", type="primary", key=f"{key}_confirm", **FULL_WIDTH):
+            record_sent({c: sent_record(queue[c]) for c in ids})
+            st.rerun()
+
+
+def _apply_editor(edited: pd.DataFrame, log_now: Dict[str, Any]) -> None:
+    """Writes table edits back to the queue (selection, email, website, handled tick)."""
+    sent_changes: Dict[str, Optional[Dict[str, Any]]] = {}
+    moved = False
+    for _, row in edited.iterrows():
+        c = row["cn"]
+        if c not in queue:
+            continue
+        if "Select" in row:
+            queue[c]["include"] = bool(row["Select"])
+        if "Email" in row:
+            new_to = str(row["Email"] or "").strip()
+            if new_to != queue[c]["to"]:
+                moved = moved or (bool(new_to) != bool(queue[c]["to"]))
+                queue[c]["to"] = new_to
+                queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
+        if "Website" in row:
+            queue[c]["website_input"] = str(row["Website"] or "").strip()
+        if bool(row["Handled"]) != (c in log_now):
+            sent_changes[c] = sent_record(queue[c]) if row["Handled"] else None
+    if sent_changes:
+        record_sent(sent_changes)
+        st.rerun()
+    if moved:  # An email was added/removed, so the firm changes group
+        bump_queue_editor()
+        st.rerun()
+
+
+def _group_title(emoji: str, title: str, count: int, tone: str) -> None:
+    render_html(
+        f'<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px 0">'
+        f'<span style="font-size:1.05rem">{emoji}</span>'
+        f'<span style="font-weight:700;color:var(--text)">{esc(title)}</span>{chip(str(count), tone)}</div>'
+    )
+
+
 if queue:
     with st.container(key="card-queue"):
         log_now = get_sent_log()
         for c in queue_order:
             ensure_draft(queue[c])
-
-        def queue_status(c: str) -> str:
-            if c in log_now:
-                label = log_now[c].get("status") or "Emailed"
-                return f"✓ {label} {sent_label(log_now[c])[2:]}"
-            if queue[c]["to"]:
-                return "Ready to email"
-            if queue[c]["lead"].phones_found:
-                return "No email · call"
-            return "No contact details"
-
-        included = [c for c in queue_order if queue[c]["include"]]
-        ready_ids = [c for c in included if queue[c]["to"] and c not in log_now]
-        call_ids = [c for c in included if not queue[c]["to"] and queue[c]["lead"].phones_found and c not in log_now]
-        open_ids = [c for c in included if c not in log_now]
-        n_handled = sum(1 for c in queue_order if c in log_now)
-        section_header(
-            "04", "Review & send",
-            f"{len(queue_order)} enriched · {len(ready_ids)} ready to email · {len(call_ids)} phone only"
-            f" · {n_handled} handled",
-        )
-
-        # Quick selection
-        q1, q2, q3, _ = st.columns([1, 1.25, 1, 1.6])
-        quick = None
-        with q1:
-            if st.button("Select all", **FULL_WIDTH):
-                quick = "all"
-        with q2:
-            if st.button("Only ready to email", **FULL_WIDTH):
-                quick = "ready"
-        with q3:
-            if st.button("Select none", **FULL_WIDTH):
-                quick = "none"
-        if quick:
-            for c in queue_order:
-                queue[c]["include"] = (
-                    quick == "all" or (quick == "ready" and bool(queue[c]["to"]) and c not in log_now)
-                )
-            bump_queue_editor()
-            st.rerun()
-
-        qdf = pd.DataFrame([
-            {
-                "cn": c,
-                "Include": bool(queue[c]["include"]),
-                "Handled": c in log_now,
-                "Status": queue_status(c),
-                "Firm": friendly_company_name(queue[c]["lead"].company_name),
-                "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
-                "Email": queue[c]["to"] or "",
-                "Phone": (queue[c]["lead"].phones_found or [""])[0],
-                "Website match": (queue[c]["lead"].website_confidence or "Not found") if queue[c]["lead"].website_url else "Not found",
-            }
-            for c in queue_order
-        ])
-        editor_kwargs = dict(
-            hide_index=True,
-            num_rows="fixed",
-            key=f"queue_editor_{st.session_state.get('queue_editor_ver', 0)}",
-            column_order=["Include", "Handled", "Status", "Firm", "Contact", "Email", "Phone", "Website match"],
-            disabled=["Status", "Firm", "Contact", "Phone", "Website match"],
-            height=min(38 + 35 * len(qdf), 460),
-            column_config={
-                "Include": st.column_config.CheckboxColumn("Select", width="small", help="Selected firms are exported and can be bulk-marked as handled"),
-                "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once emailed or dealt with. Saved permanently."),
-                "Status": st.column_config.TextColumn("Status", width="small"),
-                "Firm": st.column_config.TextColumn("Firm", width="medium"),
-                "Contact": st.column_config.TextColumn("Contact", width="small"),
-                "Email": st.column_config.TextColumn("Email (editable)", width="medium"),
-                "Phone": st.column_config.TextColumn("Phone", width="small"),
-                "Website match": st.column_config.TextColumn("Website", width="small"),
-            },
-        )
-        try:
-            edited = st.data_editor(qdf, width="stretch", **editor_kwargs)
-        except Exception:
-            edited = st.data_editor(qdf, use_container_width=True, **editor_kwargs)
-
-        # Apply edits from the table
-        sent_changes: Dict[str, Optional[Dict[str, Any]]] = {}
-        for _, row in edited.iterrows():
-            c = row["cn"]
-            if c not in queue:
-                continue
-            queue[c]["include"] = bool(row["Include"])
-            new_to = str(row["Email"] or "").strip()
-            if new_to != queue[c]["to"]:
-                queue[c]["to"] = new_to
-                queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
-            if bool(row["Handled"]) != (c in log_now):
-                sent_changes[c] = sent_record(queue[c]) if row["Handled"] else None
-        if sent_changes:
-            record_sent(sent_changes)
-            st.rerun()
-
-        # Recount after edits so the buttons match the table
-        included = [c for c in queue_order if queue[c]["include"]]
-        ready_ids = [c for c in included if queue[c]["to"] and c not in log_now]
-        open_ids = [c for c in included if c not in log_now]
-        no_email_ids = [c for c in open_ids if not queue[c]["to"]]
+        ready_all = [c for c in queue_order if c not in log_now and queue[c]["to"]]
+        noemail_all = [c for c in queue_order if c not in log_now and not queue[c]["to"]]
+        handled_all = [c for c in queue_order if c in log_now]
+        ver = st.session_state.get("queue_editor_ver", 0)
         stamp = now_uk().strftime("%Y-%m-%d_%H%M")
 
-        a1, a2, a3, a4 = columns([1.5, 1.2, 1.2, 0.7])
-        with a1:
-            if ready_ids:
-                zip_bytes, n_written, _skipped = build_drafts_zip([queue[c] for c in ready_ids], st.session_state["opt_attach"])
+        section_header(
+            "04", "Review & send",
+            f"{len(queue_order)} enriched · {len(ready_all)} ready to email · {len(noemail_all)} no email found"
+            f" · {len(handled_all)} handled",
+        )
+
+        # ===== 1. Ready to email =====
+        _group_title("✉️", "Ready to email", len(ready_all), "good")
+        if not ready_all:
+            st.caption("No firms with an email address yet. Check the No email found list below.")
+        else:
+            st.caption("These firms have an email address. Untick any you don't want, fix addresses inline, then export.")
+            rdf = pd.DataFrame([{
+                "cn": c,
+                "Select": bool(queue[c]["include"]),
+                "Handled": False,
+                "Firm": lead_display_name(queue[c]["lead"]),
+                "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
+                "Email": queue[c]["to"],
+                "Phone": (queue[c]["lead"].phones_found or [""])[0],
+                "Website match": _website_label(queue[c]["lead"]),
+            } for c in ready_all])
+            edited = _data_editor(
+                rdf, hide_index=True, num_rows="fixed", key=f"q_ready_{ver}",
+                height=min(38 + 35 * len(rdf), 390),
+                column_order=["Select", "Handled", "Firm", "Contact", "Email", "Phone", "Website match"],
+                disabled=["Firm", "Contact", "Phone", "Website match"],
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                    "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once emailed. Saved permanently."),
+                    "Firm": st.column_config.TextColumn("Firm", width="medium"),
+                    "Contact": st.column_config.TextColumn("Contact", width="small"),
+                    "Email": st.column_config.TextColumn("Email (editable)", width="medium", help="Clear it to move the firm to No email found"),
+                    "Phone": st.column_config.TextColumn("Phone", width="small"),
+                    "Website match": st.column_config.TextColumn("Website", width="small"),
+                },
+            )
+            _apply_editor(edited, log_now)
+            ready_sel = [c for c in ready_all if queue[c]["include"]]
+            r1, r2 = st.columns([1.4, 1])
+            with r1:
+                if ready_sel:
+                    zip_bytes, n_written, _ = build_drafts_zip([queue[c] for c in ready_sel], st.session_state["opt_attach"])
+                    st.download_button(
+                        f"📦  Download {n_written} email {'draft' if n_written == 1 else 'drafts'} (.zip)",
+                        data=zip_bytes,
+                        file_name=f"SY_Communications_drafts_{stamp}.zip",
+                        mime="application/zip", type="primary",
+                        help="One ready-to-send Outlook draft per selected firm, each with its PDF attached.",
+                        **FULL_WIDTH,
+                    )
+                else:
+                    st.button("📦  Select firms to export", disabled=True, **FULL_WIDTH)
+            with r2:
+                _mark_handled_popover(ready_sel, "firms", "pop_ready")
+
+        # ===== 2. No email found =====
+        _group_title("📞", "No email found", len(noemail_all), "warn")
+        if not noemail_all:
+            st.caption("Every enriched firm has an email address.")
+        else:
+            st.caption(
+                "Phone these from the call list, type an email if you know one (the firm moves up to Ready to"
+                " email), or paste their real website and hit Retry."
+            )
+            ndf = pd.DataFrame([{
+                "cn": c,
+                "Select": bool(queue[c]["include"]),
+                "Handled": False,
+                "Firm": lead_display_name(queue[c]["lead"]),
+                "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
+                "Phone": (queue[c]["lead"].phones_found or [""])[0],
+                "Email": "",
+                "Website": queue[c].get("website_input") or (queue[c]["lead"].website_url or ""),
+                "Why": ("No website" if not queue[c]["lead"].website_url
+                        else "No email on site"),
+            } for c in noemail_all])
+            edited = _data_editor(
+                ndf, hide_index=True, num_rows="fixed", key=f"q_noemail_{ver}",
+                height=min(38 + 35 * len(ndf), 390),
+                column_order=["Select", "Handled", "Firm", "Contact", "Phone", "Email", "Website", "Why"],
+                disabled=["Firm", "Contact", "Phone", "Why"],
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", width="small"),
+                    "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once called or dealt with."),
+                    "Firm": st.column_config.TextColumn("Firm", width="medium"),
+                    "Contact": st.column_config.TextColumn("Contact", width="small"),
+                    "Phone": st.column_config.TextColumn("Phone", width="small"),
+                    "Email": st.column_config.TextColumn("Add email", width="medium", help="Type an address to move this firm to Ready to email"),
+                    "Website": st.column_config.TextColumn("Website (editable)", width="medium", help="Paste the right website, then Retry"),
+                    "Why": st.column_config.TextColumn("Why", width="small"),
+                },
+            )
+            _apply_editor(edited, log_now)
+            noemail_sel = [c for c in noemail_all if queue[c]["include"]]
+            retry_ids = [
+                c for c in noemail_sel
+                if queue[c].get("website_input") and domain_of(queue[c]["website_input"]) != domain_of(queue[c]["lead"].website_url or "")
+            ]
+            n1, n2, n3 = st.columns(3)
+            with n1:
+                if st.button(f"🔁  Retry {len(retry_ids)} with new website", disabled=not retry_ids, **FULL_WIDTH,
+                             help="Re-scrapes the selected firms whose website you've changed."):
+                    run_enrichment(
+                        [{"Company Number": c, "Company Name": queue[c]["lead"].company_name} for c in retry_ids],
+                        queue[retry_ids[0]]["vertical"],
+                        manual_websites={c: queue[c]["website_input"] for c in retry_ids},
+                    )
+                    st.rerun()
+            with n2:
                 st.download_button(
-                    f"📦  {n_written} email {'draft' if n_written == 1 else 'drafts'} (.zip)",
-                    data=zip_bytes,
-                    file_name=f"SY_Communications_drafts_{stamp}.zip",
-                    mime="application/zip",
-                    type="primary",
-                    help="One ready-to-send Outlook draft per selected firm that has an email address.",
+                    f"📋  Call list: {len(noemail_sel)} (.csv)",
+                    data=build_lead_list_csv([queue[c] for c in noemail_sel], log_now),
+                    file_name=f"SY_Communications_call_list_{stamp}.csv",
+                    mime="text/csv", disabled=not noemail_sel,
+                    help="Selected firms with phone numbers, directors and websites. Opens in Excel.",
                     **FULL_WIDTH,
                 )
-            else:
-                st.button("📦  No emails to export", disabled=True, **FULL_WIDTH,
-                          help="None of the selected firms has an email address yet.")
-        with a2:
+            with n3:
+                _mark_handled_popover(noemail_sel, "firms", "pop_noemail")
+
+        # ===== 3. Handled =====
+        if handled_all:
+            with st.expander(f"✓ Handled ({len(handled_all)})"):
+                hdf = pd.DataFrame([{
+                    "cn": c,
+                    "Handled": True,
+                    "Status": f"{log_now[c].get('status') or 'Emailed'} {sent_label(log_now[c])[2:]}",
+                    "Firm": lead_display_name(queue[c]["lead"]),
+                    "Sent to": log_now[c].get("to") or "",
+                    "By": log_now[c].get("sent_by") or "",
+                } for c in handled_all])
+                edited = _data_editor(
+                    hdf, hide_index=True, num_rows="fixed", key=f"q_handled_{ver}",
+                    column_order=["Handled", "Status", "Firm", "Sent to", "By"],
+                    disabled=["Status", "Firm", "Sent to", "By"],
+                    column_config={"Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Untick to move it back")},
+                )
+                _apply_editor(edited, log_now)
+
+        # ===== Footer =====
+        st.write("")
+        f1, f2, _ = st.columns([1.3, 0.8, 1.4])
+        with f1:
             st.download_button(
-                f"📋  Lead list: {len(included)} {'firm' if len(included) == 1 else 'firms'} (.csv)",
-                data=build_lead_list_csv([queue[c] for c in included], log_now),
+                f"📋  Full lead list: {len(queue_order)} firms (.csv)",
+                data=build_lead_list_csv([queue[c] for c in queue_order], log_now),
                 file_name=f"SY_Communications_lead_list_{stamp}.csv",
-                mime="text/csv",
-                disabled=not included,
-                help="Every selected firm (with or without email): contacts, phones, directors, website. Opens in Excel.",
-                **FULL_WIDTH,
+                mime="text/csv", **FULL_WIDTH,
             )
-        with a3:
-            pop_kwargs = dict(disabled=not open_ids, **FULL_WIDTH)
-            try:  # A fresh key after each save closes the pop-up
-                pop = st.popover(f"✅  Mark {len(open_ids)} as handled",
-                                 key=f"pop_handled_{st.session_state.get('sent_log_ver', 0)}", **pop_kwargs)
-            except TypeError:
-                pop = st.popover(f"✅  Mark {len(open_ids)} as handled", **pop_kwargs)
-            with pop:
-                st.markdown(
-                    f"Mark **{len(open_ids)} selected {'firm' if len(open_ids) == 1 else 'firms'}** as handled?"
-                )
-                st.caption(
-                    f"{len(open_ids) - len(no_email_ids)} will be logged as *Emailed* and {len(no_email_ids)} as"
-                    " *Handled* (no email). They'll show as contacted in future searches. You can untick any"
-                    " of them in the table afterwards."
-                )
-                if st.button("Yes, mark as handled", type="primary", key="confirm_mark_handled", **FULL_WIDTH):
-                    record_sent({c: sent_record(queue[c]) for c in open_ids})
-                    st.rerun()
-        with a4:
-            if st.button("Clear", **FULL_WIDTH, help="Empty the review queue (handled ticks are kept)."):
+        with f2:
+            if st.button("Clear queue", **FULL_WIDTH, help="Empty the review queue (handled ticks are kept)."):
                 st.session_state["queue"] = {}
                 st.session_state["queue_order"] = []
                 bump_queue_editor()
                 st.rerun()
-
-        notes = [
-            f"{len(included)} selected: {len(ready_ids)} can be emailed"
-            + (f", {len(no_email_ids)} {'has' if len(no_email_ids) == 1 else 'have'} no email address"
-               " (they're in the lead list, so you can phone them or add an email in the table)" if no_email_ids else "")
-            + "."
-        ]
-        if ready_ids:
-            notes.append(
-                "The zip has one ready-to-send Outlook draft per firm"
-                + (", each with its own personalised PDF attached" if st.session_state["opt_attach"] else "")
-                + ". Open each draft, hit Send, then use Mark as handled."
-            )
-        for note in notes:
-            st.caption("💡 " + note)
 
 
 # ---------------- Late-rendered pieces (reflect this run's state) ----------------
