@@ -139,7 +139,7 @@ class LeadEnricher:
         sic_codes: List[str],
         location_keyword: Optional[str] = None,
         company_name_includes: Optional[str] = None,
-        limit: int = 20,
+        limit: int = 25,
     ) -> List[Dict[str, Any]]:
         """Feed active companies by SIC code vertical and location."""
         if not self.ch_api_key:
@@ -266,7 +266,6 @@ class LeadEnricher:
 
                 for link in links:
                     raw_text = link.get_text().strip()
-                    # ensure valid domain formatting
                     domain = raw_text.split("/")[0].strip()
                     if domain and not any(b in domain for b in blocked_domains):
                         return f"https://{domain}"
@@ -275,7 +274,6 @@ class LeadEnricher:
         return None
 
     def scrape_contact_channels(self, base_url: str) -> Dict[str, Any]:
-        """Deep scrape the homepage and /contact /about pages for email & phone."""
         emails: Set[str] = set()
         phones: Set[str] = set()
         description = ""
@@ -291,7 +289,6 @@ class LeadEnricher:
         if not base_url.startswith("http"):
             base_url = f"https://{base_url}"
 
-        # Clean base url to root domain
         parsed = urlparse(base_url)
         root = f"{parsed.scheme}://{parsed.netloc}"
 
@@ -310,31 +307,26 @@ class LeadEnricher:
 
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # Grab description from homepage
                 if not description:
                     meta_tag = soup.find("meta", attrs={"name": "description"})
                     if meta_tag and meta_tag.get("content"):
                         description = meta_tag["content"].strip()
 
-                # 1. Scrape mailto links
                 for mailto in soup.select('a[href^="mailto:"]'):
                     em = mailto["href"].replace("mailto:", "").split("?")[0]
                     em_clean = em.strip().lower()
                     if em_clean and "@" in em_clean and "." in em_clean:
-                        # filter out standard tracking or asset emails
                         if not any(
                             ext in em_clean
                             for ext in [".png", ".jpg", "sentry.io"]
                         ):
                             emails.add(em_clean)
 
-                # 2. Scrape tel links
                 for tel in soup.select('a[href^="tel:"]'):
                     ph = tel["href"].replace("tel:", "").strip()
                     if len(ph) >= 9:
                         phones.add(ph)
 
-                # 3. Regex sweep for UK phone & in-text email addresses
                 page_text = soup.get_text()
 
                 text_emails = re.findall(
@@ -404,14 +396,12 @@ class LeadEnricher:
 
         officers = self.get_officers(company_number)
 
-        # Website discovery step: manual input first, auto-search if empty
         target_website = manual_website.strip() if manual_website else None
         if not target_website:
             target_website = self.auto_discover_website(
                 company_name, location=town_or_postcode
             )
 
-        # Scrape web contacts
         site_contacts = (
             self.scrape_contact_channels(target_website)
             if target_website
@@ -445,8 +435,8 @@ st.set_page_config(page_title="Prospect Discovery Engine", layout="wide")
 
 st.title("🎯 Prospect Feed & Automated Web Discovery")
 st.caption(
-    "Query the Companies House registry, then automatically discover their"
-    " commercial domain, contact numbers, and emails."
+    "Query the Companies House registry, then click any row in the table to"
+    " enrich contacts."
 )
 
 default_ch_key = st.secrets.get("COMPANIES_HOUSE_KEY", "")
@@ -466,7 +456,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**Automated Pipeline:**")
     st.markdown("1. Search Active UK entities by SIC.")
-    st.markdown("2. Select an operating firm.")
+    st.markdown("2. Click any table row to select.")
     st.markdown("3. Auto-find domain & scrape direct contact points.")
 
 col_left, col_right = st.columns([1.1, 0.9])
@@ -505,39 +495,62 @@ with col_left:
                     sic_codes=vertical_config["sic_codes"],
                     location_keyword=location_input,
                     company_name_includes=keyword_filter,
-                    limit=20,
+                    limit=25,
                 )
                 st.session_state["discovered_leads"] = leads_list
                 st.session_state["active_vertical_name"] = selected_vertical_name
+                # Reset any previous row selection
+                st.session_state["selected_lead_row"] = None
 
-    # Step 2: Select & Auto-Enrich
+    # Step 2: Select & Auto-Enrich via Direct Table Click
     if st.session_state.get("discovered_leads"):
         st.write("---")
-        st.subheader("Step 2: Select a Target to Enrich")
+        st.subheader("Step 2: Click a Row to Select Target")
+        st.caption(
+            "👉 Click anywhere on a company row below to select it for"
+            " enrichment."
+        )
 
         leads_data = st.session_state["discovered_leads"]
         df = pd.DataFrame(leads_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
 
-        company_options = {
-            f"{row['Company Name']} ({row['Company Number']}) — {row['Town / Postcode']}": row[
-                "Company Number"
-            ]
-            for row in leads_data
-        }
-
-        selected_label = st.selectbox(
-            "Choose Company to Enrich:", options=list(company_options.keys())
+        # Native interactive row selection table
+        table_event = st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
         )
-        selected_company_number = company_options[selected_label]
+
+        # Check if user clicked a row in the table
+        selected_rows = table_event.selection.rows if table_event else []
+
+        if selected_rows:
+            st.session_state["selected_lead_row"] = leads_data[selected_rows[0]]
+        elif (
+            "selected_lead_row" not in st.session_state
+            or not st.session_state["selected_lead_row"]
+        ):
+            # Default to the first row if nothing selected yet
+            st.session_state["selected_lead_row"] = leads_data[0]
+
+        target_row = st.session_state["selected_lead_row"]
+
+        st.markdown(
+            f"**Selected Target:** `{target_row['Company Name']}`"
+            f" *(#{target_row['Company Number']} —"
+            f" {target_row['Town / Postcode']})*"
+        )
 
         website_override = st.text_input(
             "Website URL (Optional — leave blank to auto-discover):",
-            placeholder="e.g. scriven.co.uk",
+            placeholder="e.g. example.co.uk",
         )
 
         enrich_btn = st.button(
-            "⚡ Auto-Discover Website & Enrich Contacts", type="secondary"
+            f"⚡ Auto-Discover & Enrich: {target_row['Company Name']}",
+            type="secondary",
         )
 
         if enrich_btn:
@@ -547,7 +560,7 @@ with col_left:
                     "active_vertical_name", "General B2B"
                 )
                 enriched_lead = enricher.enrich_selected_company(
-                    company_number=selected_company_number,
+                    company_number=target_row["Company Number"],
                     sector_name=current_vertical,
                     manual_website=website_override,
                 )
@@ -613,4 +626,4 @@ with col_right:
             "Profile ready. Next: Connect LLM Pitch & Dossier PDF Builder."
         )
     else:
-        st.info("Select a company from the feed to run automated discovery.")
+        st.info("Click any company row in the table to enrich its profile.")
