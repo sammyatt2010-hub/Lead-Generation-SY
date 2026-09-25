@@ -6,6 +6,7 @@ import json
 import os
 import zipfile
 import re
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -913,13 +914,21 @@ class LeadEnricher:
             return []
         url = f"{self.base_url}/company/{company_number}/officers"
         officers = []
+        self.last_officer_error = None
         try:
+            # NB: don't send register_view=true. Companies House answers 400/404 for most firms,
+            # which silently returned no directors. Resigned officers are filtered out below instead.
             resp = requests.get(
                 url,
                 headers=self.headers,
-                params={"register_view": "true"},
+                params={"items_per_page": 100},
                 timeout=10,
             )
+            if resp.status_code == 429:  # Rate limited during a big batch: wait and retry once
+                time.sleep(2)
+                resp = requests.get(url, headers=self.headers, params={"items_per_page": 100}, timeout=10)
+            if resp.status_code != 200:
+                self.last_officer_error = f"Companies House officers lookup failed ({resp.status_code})"
             if resp.status_code == 200:
                 for item in resp.json().get("items", []):
                     if not item.get("resigned_on"):
@@ -932,8 +941,8 @@ class LeadEnricher:
                                 appointed_on=item.get("appointed_on"),
                             )
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            self.last_officer_error = f"Companies House officers lookup failed ({exc.__class__.__name__})"
         return officers
 
     # ------------------------------------------------------------------
@@ -1265,6 +1274,8 @@ class LeadEnricher:
                   "resolved_url": None, "pages_checked": []}
         )
         notes = list(discovery.get("notes", []))
+        if getattr(self, "last_officer_error", None):
+            notes.append(self.last_officer_error)
         if target_website and not site_contacts.get("pages_checked"):
             notes.append("Website didn't respond when scraping contacts")
 
@@ -2259,6 +2270,36 @@ def draft_filename_part(company_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", friendly_company_name(company_name)).strip("_") or "firm"
 
 
+def build_lead_list_csv(items: List[Dict[str, Any]], log: Dict[str, Any]) -> bytes:
+    """Spreadsheet of every selected firm, including those with no email (for phoning)."""
+    rows = []
+    for item in items:
+        lead: ScrapedLead = item["lead"]
+        cn = lead.company_number or ""
+        contact, role = infer_contact_name_and_role(lead, item["vertical"])
+        directors = [display_officer_name(o.name) for o in lead.officers if o.raw_role in DECISION_MAKER_ROLES]
+        rec = log.get(cn)
+        rows.append({
+            "Status": (f"{rec.get('status') or 'Emailed'} {sent_label(rec)[2:]}" if rec
+                       else "Ready to email" if item.get("to") else "No email"),
+            "Firm": lead.company_name,
+            "Company number": cn,
+            "Sector": item["vertical"],
+            "Contact": contact,
+            "Contact role": role,
+            "Email": item.get("to", ""),
+            "Other emails": "; ".join(e for e in lead.emails_found if e != item.get("to")),
+            "Phone": (lead.phones_found or [""])[0],
+            "Other phones": "; ".join(lead.phones_found[1:]),
+            "Directors": "; ".join(directors),
+            "Website": lead.website_url or "",
+            "Website match": (lead.website_confidence or "") if lead.website_url else "Not found",
+            "Registered office": lead.registered_address or "",
+            "Email subject": item.get("subject", "") if item.get("to") else "",
+        })
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig")  # utf-8-sig = opens cleanly in Excel
+
+
 def build_drafts_zip(items: List[Dict[str, Any]], attach_overview: bool) -> Tuple[bytes, int, List[str]]:
     """items: queue items with lead/vertical/to/subject/body. Returns (zip_bytes, drafts_written, skipped_names)."""
     buf = io.BytesIO()
@@ -2384,6 +2425,7 @@ def sent_record(item: Dict[str, Any]) -> Dict[str, Any]:
         "subject": item.get("subject", ""),
         "sent_at": now_uk().isoformat(timespec="seconds"),
         "sent_by": get_sender().get("name", ""),
+        "status": "Emailed" if item.get("to") else "Handled",
     }
 
 
@@ -2902,7 +2944,7 @@ with col_right:
 
                 # Sent tick: saved to the permanent log, so it's there next time anyone opens the app
                 sent_now = st.checkbox(
-                    "✅  Sent: tick once this email has gone",
+                    "✅  Handled: tick once this email has gone",
                     value=is_sent,
                     key=f"sent_chk_{cn}_{st.session_state.get('sent_log_ver', 0)}",
                     help="Saved permanently, and shows as Contacted in future searches.",
@@ -2935,20 +2977,54 @@ if queue:
         log_now = get_sent_log()
         for c in queue_order:
             ensure_draft(queue[c])
-        n_total = len(queue_order)
-        n_sent = sum(1 for c in queue_order if c in log_now)
-        n_ready = sum(1 for c in queue_order if queue[c]["include"] and queue[c]["to"] and c not in log_now)
+
+        def queue_status(c: str) -> str:
+            if c in log_now:
+                label = log_now[c].get("status") or "Emailed"
+                return f"✓ {label} {sent_label(log_now[c])[2:]}"
+            if queue[c]["to"]:
+                return "Ready to email"
+            if queue[c]["lead"].phones_found:
+                return "No email · call"
+            return "No contact details"
+
+        included = [c for c in queue_order if queue[c]["include"]]
+        ready_ids = [c for c in included if queue[c]["to"] and c not in log_now]
+        call_ids = [c for c in included if not queue[c]["to"] and queue[c]["lead"].phones_found and c not in log_now]
+        open_ids = [c for c in included if c not in log_now]
+        n_handled = sum(1 for c in queue_order if c in log_now)
         section_header(
             "04", "Review & send",
-            f"{n_total} enriched · {n_ready} ready to send · {n_sent} sent. Untick anything that looks off,"
-            " fix emails inline, then export the batch or send one at a time from the dossier.",
+            f"{len(queue_order)} enriched · {len(ready_ids)} ready to email · {len(call_ids)} phone only"
+            f" · {n_handled} handled",
         )
+
+        # Quick selection
+        q1, q2, q3, _ = st.columns([1, 1.25, 1, 1.6])
+        quick = None
+        with q1:
+            if st.button("Select all", **FULL_WIDTH):
+                quick = "all"
+        with q2:
+            if st.button("Only ready to email", **FULL_WIDTH):
+                quick = "ready"
+        with q3:
+            if st.button("Select none", **FULL_WIDTH):
+                quick = "none"
+        if quick:
+            for c in queue_order:
+                queue[c]["include"] = (
+                    quick == "all" or (quick == "ready" and bool(queue[c]["to"]) and c not in log_now)
+                )
+            bump_queue_editor()
+            st.rerun()
 
         qdf = pd.DataFrame([
             {
                 "cn": c,
                 "Include": bool(queue[c]["include"]),
-                "Sent": c in log_now,
+                "Handled": c in log_now,
+                "Status": queue_status(c),
                 "Firm": friendly_company_name(queue[c]["lead"].company_name),
                 "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
                 "Email": queue[c]["to"] or "",
@@ -2961,16 +3037,18 @@ if queue:
             hide_index=True,
             num_rows="fixed",
             key=f"queue_editor_{st.session_state.get('queue_editor_ver', 0)}",
-            column_order=["Include", "Sent", "Firm", "Contact", "Email", "Phone", "Website match"],
-            disabled=["Firm", "Contact", "Phone", "Website match"],
+            column_order=["Include", "Handled", "Status", "Firm", "Contact", "Email", "Phone", "Website match"],
+            disabled=["Status", "Firm", "Contact", "Phone", "Website match"],
+            height=min(38 + 35 * len(qdf), 460),
             column_config={
-                "Include": st.column_config.CheckboxColumn("Include", width="small", help="Untick to leave out of the batch export"),
-                "Sent": st.column_config.CheckboxColumn("Sent ✓", width="small", help="Tick once emailed. Saved permanently."),
+                "Include": st.column_config.CheckboxColumn("Select", width="small", help="Selected firms are exported and can be bulk-marked as handled"),
+                "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once emailed or dealt with. Saved permanently."),
+                "Status": st.column_config.TextColumn("Status", width="small"),
                 "Firm": st.column_config.TextColumn("Firm", width="medium"),
                 "Contact": st.column_config.TextColumn("Contact", width="small"),
                 "Email": st.column_config.TextColumn("Email (editable)", width="medium"),
                 "Phone": st.column_config.TextColumn("Phone", width="small"),
-                "Website match": st.column_config.TextColumn("Website match", width="small"),
+                "Website match": st.column_config.TextColumn("Website", width="small"),
             },
         )
         try:
@@ -2989,48 +3067,83 @@ if queue:
             if new_to != queue[c]["to"]:
                 queue[c]["to"] = new_to
                 queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
-            if bool(row["Sent"]) != (c in log_now):
-                sent_changes[c] = sent_record(queue[c]) if row["Sent"] else None
+            if bool(row["Handled"]) != (c in log_now):
+                sent_changes[c] = sent_record(queue[c]) if row["Handled"] else None
         if sent_changes:
             record_sent(sent_changes)
             st.rerun()
 
-        export_items = [queue[c] for c in queue_order if queue[c]["include"] and c not in log_now]
-        a1, a2, a3 = columns([1.6, 1.2, 0.8])
+        # Recount after edits so the buttons match the table
+        included = [c for c in queue_order if queue[c]["include"]]
+        ready_ids = [c for c in included if queue[c]["to"] and c not in log_now]
+        open_ids = [c for c in included if c not in log_now]
+        no_email_ids = [c for c in open_ids if not queue[c]["to"]]
+        stamp = now_uk().strftime("%Y-%m-%d_%H%M")
+
+        a1, a2, a3, a4 = columns([1.5, 1.2, 1.2, 0.7])
         with a1:
-            if export_items:
-                zip_bytes, n_written, skipped = build_drafts_zip(export_items, st.session_state["opt_attach"])
+            if ready_ids:
+                zip_bytes, n_written, _skipped = build_drafts_zip([queue[c] for c in ready_ids], st.session_state["opt_attach"])
                 st.download_button(
-                    f"📦  Download {n_written} Outlook drafts (.zip)",
+                    f"📦  {n_written} email {'draft' if n_written == 1 else 'drafts'} (.zip)",
                     data=zip_bytes,
-                    file_name=f"SY_Communications_drafts_{now_uk().strftime('%Y-%m-%d_%H%M')}.zip",
+                    file_name=f"SY_Communications_drafts_{stamp}.zip",
                     mime="application/zip",
                     type="primary",
-                    disabled=n_written == 0,
+                    help="One ready-to-send Outlook draft per selected firm that has an email address.",
                     **FULL_WIDTH,
                 )
             else:
-                skipped = []
-                st.button("📦  Nothing left to export", disabled=True, **FULL_WIDTH)
+                st.button("📦  No emails to export", disabled=True, **FULL_WIDTH,
+                          help="None of the selected firms has an email address yet.")
         with a2:
-            mark_ids = [c for c in queue_order if queue[c]["include"] and queue[c]["to"] and c not in log_now]
-            if st.button(f"✅  Mark {len(mark_ids)} as sent", disabled=not mark_ids, **FULL_WIDTH,
-                         help="Use after you've sent the exported drafts."):
-                record_sent({c: sent_record(queue[c]) for c in mark_ids})
-                st.rerun()
+            st.download_button(
+                f"📋  Lead list: {len(included)} {'firm' if len(included) == 1 else 'firms'} (.csv)",
+                data=build_lead_list_csv([queue[c] for c in included], log_now),
+                file_name=f"SY_Communications_lead_list_{stamp}.csv",
+                mime="text/csv",
+                disabled=not included,
+                help="Every selected firm (with or without email): contacts, phones, directors, website. Opens in Excel.",
+                **FULL_WIDTH,
+            )
         with a3:
-            if st.button("Clear queue", **FULL_WIDTH):
+            pop_kwargs = dict(disabled=not open_ids, **FULL_WIDTH)
+            try:  # A fresh key after each save closes the pop-up
+                pop = st.popover(f"✅  Mark {len(open_ids)} as handled",
+                                 key=f"pop_handled_{st.session_state.get('sent_log_ver', 0)}", **pop_kwargs)
+            except TypeError:
+                pop = st.popover(f"✅  Mark {len(open_ids)} as handled", **pop_kwargs)
+            with pop:
+                st.markdown(
+                    f"Mark **{len(open_ids)} selected {'firm' if len(open_ids) == 1 else 'firms'}** as handled?"
+                )
+                st.caption(
+                    f"{len(open_ids) - len(no_email_ids)} will be logged as *Emailed* and {len(no_email_ids)} as"
+                    " *Handled* (no email). They'll show as contacted in future searches. You can untick any"
+                    " of them in the table afterwards."
+                )
+                if st.button("Yes, mark as handled", type="primary", key="confirm_mark_handled", **FULL_WIDTH):
+                    record_sent({c: sent_record(queue[c]) for c in open_ids})
+                    st.rerun()
+        with a4:
+            if st.button("Clear", **FULL_WIDTH, help="Empty the review queue (handled ticks are kept)."):
                 st.session_state["queue"] = {}
                 st.session_state["queue_order"] = []
                 bump_queue_editor()
                 st.rerun()
+
         notes = [
-            "The zip holds one ready-to-send Outlook draft per firm"
-            + (", each with its own personalised PDF attached" if st.session_state["opt_attach"] else "")
-            + ", plus a summary spreadsheet. Unzip, open each draft, check it, hit Send, then tick Sent ✓ here."
+            f"{len(included)} selected: {len(ready_ids)} can be emailed"
+            + (f", {len(no_email_ids)} {'has' if len(no_email_ids) == 1 else 'have'} no email address"
+               " (they're in the lead list, so you can phone them or add an email in the table)" if no_email_ids else "")
+            + "."
         ]
-        if skipped:
-            notes.append("No email address (left out of the zip): " + ", ".join(skipped) + ". Add one in the Email column.")
+        if ready_ids:
+            notes.append(
+                "The zip has one ready-to-send Outlook draft per firm"
+                + (", each with its own personalised PDF attached" if st.session_state["opt_attach"] else "")
+                + ". Open each draft, hit Send, then use Mark as handled."
+            )
         for note in notes:
             st.caption("💡 " + note)
 
@@ -3049,7 +3162,7 @@ render_html(
     '<div class="pe-stats">'
     f'<div class="pe-stat"><div class="v">{st.session_state["stat_firms"]}</div><div class="l">Firms</div></div>'
     f'<div class="pe-stat"><div class="v">{len(queue)}</div><div class="l">Enriched</div></div>'
-    f'<div class="pe-stat"><div class="v">{len(get_sent_log())}</div><div class="l">Sent</div></div>'
+    f'<div class="pe-stat"><div class="v">{len(get_sent_log())}</div><div class="l">Handled</div></div>'
     "</div>",
     target=sidebar_stats_slot,
 )
