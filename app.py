@@ -9,7 +9,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -269,6 +269,13 @@ hr { border-color: var(--border) !important; }
 .pe-hook li { font-size: 0.85rem; color: var(--text); padding: 4px 0 4px 24px; position: relative; }
 .pe-hook li::before { content: ""; position: absolute; left: 4px; top: 10px; width: 8px; height: 8px; border-radius: 50%; background: var(--grad); }
 
+/* Workspace switch in sidebar */
+[data-testid="stSidebar"] [role="radiogroup"] { gap: 6px; margin-bottom: 6px; }
+[data-testid="stSidebar"] [role="radiogroup"] label { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 12px !important; margin: 0 !important; width: 100%; }
+[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) { border-color: rgba(124,131,255,.55); background: var(--accent-soft); }
+[data-testid="stSidebar"] [role="radiogroup"] label p { font-weight: 600 !important; font-size: .88rem !important; color: var(--text) !important;
+  text-transform: none !important; letter-spacing: 0 !important; }
 /* Sidebar components */
 .pe-brand { display: flex; align-items: center; gap: 12px; padding: 4px 0 18px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .pe-logo { width: 40px; height: 40px; border-radius: 12px; background: var(--grad); display: grid; place-items: center; color: #0A0E1A;
@@ -1227,14 +1234,18 @@ class LeadEnricher:
         candidates = candidates[:6]
 
         # B. Domain guesses (works even when search engines block us)
+        guessed_only: Set[str] = set()
         for guess in guess_domains(company_name) + (guess_domains(trading_name) if trading_name else []):
             if guess not in candidates:
                 candidates.append(guess)
+                guessed_only.add(guess)
         # The Google Maps listing's own website goes first
         if places_domain and not is_blocked_domain(places_domain):
             candidates = [places_domain] + [c for c in candidates if c != places_domain]
 
         # C. Fetch & score candidates in parallel
+        rejected_guesses: List[str] = []
+
         def check(domain: str):
             page = self._fetch_html(f"https://{domain}") or self._fetch_html(f"http://{domain}")
             if not page:
@@ -1252,9 +1263,17 @@ class LeadEnricher:
                 )
                 if t_score > score:
                     score, reasons = t_score, t_reasons
-            if places_domain and final_domain in (places_domain, "www." + places_domain):
+            on_listing = bool(places_domain and final_domain in (places_domain, "www." + places_domain))
+            if on_listing:
                 score += 35
                 reasons = ["website on the firm's Google Maps listing"] + reasons
+            elif domain in guessed_only:
+                # A guessed address (e.g. elliott.com) must prove it's this firm: a matching name in the
+                # web address or page title isn't enough, since big unrelated sites share common names.
+                strong = ("company number", "full legal name", "registered postcode", "mentions ")
+                if not any(r.startswith(strong) for r in reasons):
+                    rejected_guesses.append(final_domain)
+                    return None
             return final_url, final_domain, score, reasons
 
         results = []
@@ -1269,7 +1288,11 @@ class LeadEnricher:
                 parsed_p = urlparse(places_website if "://" in places_website else "https://" + places_website)
                 return {"url": f"{parsed_p.scheme}://{parsed_p.netloc}", "confidence": "Medium",
                         "reasons": ["website on the firm's Google Maps listing"], "notes": notes}
-            notes.append("No candidate website responded")
+            if rejected_guesses:
+                notes.append("Ignored " + ", ".join(sorted(set(rejected_guesses))[:3])
+                             + ": nothing on the site ties it to this company")
+            else:
+                notes.append("No candidate website responded")
             return {"url": None, "confidence": None, "reasons": [], "notes": notes}
 
         results.sort(key=lambda r: r[2], reverse=True)
@@ -2310,17 +2333,18 @@ class SentLog:
     Fallback: a local file, which Streamlit Cloud wipes whenever the app restarts or redeploys.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, path_secret: str = "GITHUB_LOG_PATH", default_path: str = "sent_log.json",
+                 local_name: str = ".sent_log.json") -> None:
         self.token = _secret_value("GITHUB_TOKEN")
         self.repo = _secret_value("GITHUB_REPO")  # e.g. "sammyatt2010-hub/prospect-engine-data"
         self.branch = _secret_value("GITHUB_BRANCH", "main")
-        self.path = _secret_value("GITHUB_LOG_PATH", "sent_log.json")
+        self.path = _secret_value(path_secret, default_path)
         self.backend = "github" if (self.token and self.repo) else "local"
         try:
             base_dir = os.path.dirname(os.path.abspath(__file__))
         except NameError:
             base_dir = os.getcwd()
-        self.local_path = os.path.join(base_dir, ".sent_log.json")
+        self.local_path = os.path.join(base_dir, local_name)
         self.last_error: Optional[str] = None
 
     # ---------- GitHub backend ----------
@@ -2587,6 +2611,99 @@ def record_sent(changes: Dict[str, Optional[Dict[str, Any]]]) -> None:
     bump_queue_editor()
 
 
+# ------------------------------------------------------------------
+# CALL LIST (permanent, shared telemarketing database)
+# ------------------------------------------------------------------
+CALL_STORE = SentLog("GITHUB_CALLS_PATH", "call_list.json", ".call_list.json")
+
+CALL_OPEN = ["New", "No answer", "Call back"]
+CALL_DONE = ["Interested", "Not interested", "Wrong number", "Do not call"]
+CALL_STATUSES = CALL_OPEN + CALL_DONE
+CALL_STATUS_TONE = {"New": "accent", "No answer": "muted", "Call back": "warn", "Interested": "good",
+                    "Not interested": "", "Wrong number": "bad", "Do not call": "bad"}
+VERIFIED_WEBSITE = ("High", "Medium", "Manual")
+
+
+def get_call_list() -> Dict[str, Any]:
+    if "call_list_data" not in st.session_state:
+        st.session_state["call_list_data"] = CALL_STORE.load()
+    return st.session_state["call_list_data"]
+
+
+def save_calls(changes: Dict[str, Optional[Dict[str, Any]]], message: str) -> None:
+    """Writes call-list changes to the permanent store (re-reads first so colleagues' edits survive)."""
+    local = dict(get_call_list())
+    try:
+        st.session_state["call_list_data"] = CALL_STORE.apply(changes, f"Prospect Engine calls: {message}")
+    except Exception as exc:
+        for key, rec in changes.items():
+            if rec is None:
+                local.pop(key, None)
+            else:
+                local[key] = rec
+        st.session_state["call_list_data"] = local
+        st.session_state["call_list_error"] = str(exc) if isinstance(exc, RuntimeError) else "Couldn't save the call list."
+    st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
+
+
+def call_record_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Only what a caller needs: who, which number, and the website if we've verified it."""
+    lead: ScrapedLead = item["lead"]
+    contact, role = infer_contact_name_and_role(lead, item["vertical"])
+    website = lead.website_url if (lead.website_url and lead.website_confidence in VERIFIED_WEBSITE) else ""
+    return {
+        "company_number": lead.company_number or "",
+        "firm": lead_display_name(lead),
+        "legal_name": lead.company_name,
+        "contact": contact,
+        "role": role,
+        "directors": [display_officer_name(o.name) for o in lead.officers if o.raw_role in DECISION_MAKER_ROLES][:3],
+        "phone": (lead.phones_found or [""])[0],
+        "other_phones": lead.phones_found[1:3],
+        "website": website,
+        "sector": item["vertical"],
+        "address": lead.registered_address or "",
+        "added_at": now_uk().isoformat(timespec="seconds"),
+        "added_by": get_sender().get("name", ""),
+        "status": "New",
+        "notes": "",
+        "callback": "",
+        "attempts": 0,
+        "last_called": "",
+        "last_called_by": "",
+        "history": [],
+    }
+
+
+def call_queue(calls: Dict[str, Any]) -> List[str]:
+    """Order to work through: callbacks that are due, then new firms, then retries (least recent first)."""
+    now = now_uk().replace(tzinfo=None)
+    due, new, retry = [], [], []
+    for cn, r in calls.items():
+        status = r.get("status", "New")
+        if status == "Call back":
+            try:
+                when = datetime.fromisoformat(r.get("callback") or "")
+                when = when.replace(tzinfo=None)
+            except ValueError:
+                when = now
+            if when <= now:
+                due.append((when, cn))
+        elif status == "New":
+            new.append((r.get("added_at", ""), cn))
+        elif status == "No answer":
+            retry.append((r.get("last_called", ""), cn))
+    return [c for _, c in sorted(due)] + [c for _, c in sorted(new)] + [c for _, c in sorted(retry)]
+
+
+def fmt_when(iso: str, with_time: bool = True) -> str:
+    try:
+        d = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return ""
+    return d.strftime("%d %b %H:%M" if with_time else "%d %b").lstrip("0")
+
+
 def sent_record(item: Dict[str, Any]) -> Dict[str, Any]:
     lead: ScrapedLead = item["lead"]
     return {
@@ -2709,6 +2826,20 @@ with st.sidebar:
         f'<div class="pe-brand"><div class="pe-logo">{icon("target", 22, 2.2)}</div>'
         f'<div><div class="n">{APP_NAME}</div><div class="s">{APP_TAGLINE}</div></div></div>'
     )
+    # ---- Workspace switch (bookmarkable: ?view=calls) ----
+    if "view" not in st.session_state:
+        st.session_state["view"] = "calls" if st.query_params.get("view") == "calls" else "prospect"
+    _n_to_call = len(call_queue(get_call_list()))
+    st.session_state["view"] = st.radio(
+        "Workspace", ["prospect", "calls"], key="w_view", label_visibility="collapsed",
+        index=0 if st.session_state["view"] == "prospect" else 1,
+        format_func=lambda v: "🎯  Prospecting" if v == "prospect" else "📞  Call list",
+    )  # Labels stay fixed: a changing label would make Streamlit reset the switch
+    if _n_to_call:
+        render_html(f'<div style="font-size:.76rem;color:var(--muted);margin:-2px 0 6px 4px">'
+                    f'{_n_to_call} {"firm" if _n_to_call == 1 else "firms"} waiting on the call list</div>')
+    if st.query_params.get("view", "prospect") != st.session_state["view"]:
+        st.query_params["view"] = st.session_state["view"]
     render_html('<div class="pe-side-h">Connections</div>')
     if secret_ch_key:
         # Key stays server-side: never placed in a widget, so never sent to the browser.
@@ -2736,14 +2867,18 @@ with st.sidebar:
     else:
         log_state = 'idle">Temporary'
     render_html(f'<div class="pe-status">Sent log<span class="st {log_state}</span></div>')
+    call_state = ('off">Error' if CALL_STORE.last_error else 'ok">Saved to GitHub' if CALL_STORE.backend == "github" else 'idle">Temporary')
+    render_html(f'<div class="pe-status">Call list<span class="st {call_state}</span></div>')
     places_state = 'ok">Connected' if _secret_value("GOOGLE_PLACES_API_KEY") else 'idle">Not set up'
     render_html(f'<div class="pe-status">Google Maps lookup<span class="st {places_state}</span></div>')
     if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
         st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
     elif SENT_LOG.backend == "local":
         st.caption("Sent ticks reset when the app restarts. Add GITHUB_TOKEN & GITHUB_REPO to Secrets to keep them permanently.")
-    if st.button("↻ Refresh sent log", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
+    if st.button("↻ Refresh shared data", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
         st.session_state.pop("sent_log_data", None)
+        st.session_state.pop("call_list_data", None)
+        st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
         st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
         bump_queue_editor()
         st.rerun()
@@ -2771,6 +2906,320 @@ with st.sidebar:
     if st.button("Log out", **FULL_WIDTH):
         st.session_state["password_correct"] = False
         st.rerun()
+
+# ---------------- CALL LIST PAGE ----------------
+CALL_CSS = """
+<style>
+.st-key-card-call-now, .st-key-card-call-list, .st-key-card-call-empty {
+  background: linear-gradient(180deg, rgba(22, 31, 51, 0.85) 0%, rgba(17, 24, 39, 0.85) 100%);
+  border: 1px solid var(--border) !important; border-radius: var(--radius); padding: 22px 22px 18px 22px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 20px 40px -24px rgba(0,0,0,0.6); }
+.st-key-card-call-now { border-color: rgba(56,214,245,.35) !important; }
+.cl-kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 18px; }
+@media (max-width: 1100px) { .cl-kpis { grid-template-columns: repeat(3, 1fr); } }
+.cl-kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; border-top: 2px solid var(--c, var(--accent)); }
+.cl-kpi .v { font-size: 1.45rem; font-weight: 800; color: var(--text); letter-spacing: -0.02em; }
+.cl-kpi .l { font-size: 0.7rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.cl-firm { font-size: 1.45rem; font-weight: 800; letter-spacing: -0.025em; color: var(--text); line-height: 1.2; }
+.cl-legal { font-size: 0.78rem; color: var(--faint); margin-top: 2px; }
+.cl-phone { display: flex; align-items: center; gap: 12px; margin: 14px 0 10px 0; padding: 14px 16px; border-radius: 14px;
+  background: linear-gradient(135deg, rgba(56,214,245,.14), rgba(124,131,255,.10)); border: 1px solid rgba(56,214,245,.35); }
+.cl-phone .ic { width: 40px; height: 40px; border-radius: 12px; background: var(--grad); color: #0A0E1A; display: grid; place-items: center; flex-shrink: 0; }
+.cl-phone a { font-size: 1.55rem; font-weight: 800; letter-spacing: -0.01em; color: var(--text) !important; text-decoration: none; }
+.cl-phone .alt { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+.cl-hist { margin-top: 6px; }
+.cl-hist .row { display: flex; gap: 10px; font-size: 0.8rem; padding: 6px 0; border-top: 1px solid var(--border); color: var(--muted); }
+.cl-hist .row b { color: var(--text); font-weight: 600; }
+.cl-hist .row .when { color: var(--faint); white-space: nowrap; min-width: 88px; }
+.cl-flash { margin-bottom: 12px; }
+.st-key-card-call-now .stButton button { min-height: 44px; }
+</style>
+"""
+
+
+def call_hero_html(to_call: int, due: int, interested: int) -> str:
+    pills = [
+        (str(to_call), "To call", "active"),
+        (str(due), "Callbacks due", "done" if due == 0 else ""),
+        (str(interested), "Interested", "done"),
+    ]
+    parts = [f'<div class="pe-step {cls}"><span class="num">{n}</span>{label}</div>' for n, label, cls in pills]
+    return (
+        '<div class="pe-hero"><div>'
+        '<div class="pe-eyebrow"><span class="dot"></span>Shared call list · saved permanently</div>'
+        '<div class="pe-title">Call list <span>&amp; dialler</span></div>'
+        '<div class="pe-sub">Firms we couldn\'t email, ready to phone. Work top to bottom: every outcome is saved'
+        ' for the whole team and shows as contacted in future searches.</div>'
+        f'</div><div class="pe-stepper">{"<div class=pe-step-sep></div>".join(parts)}</div></div>'
+    )
+
+
+def log_call(cn: str, outcome: str, notes: str, callback_at: Optional[datetime]) -> None:
+    calls = get_call_list()
+    if cn not in calls:
+        return
+    caller = get_sender().get("name", "")
+    r = dict(calls[cn])
+    stamp = now_uk().isoformat(timespec="seconds")
+    entry = {"at": stamp, "by": caller, "outcome": outcome, "note": (notes or "").strip()}
+    r["history"] = list(r.get("history") or []) + [entry]
+    r.update(status=outcome, notes=notes or "", attempts=int(r.get("attempts") or 0) + 1,
+             last_called=stamp, last_called_by=caller,
+             callback=callback_at.isoformat(timespec="minutes") if (outcome == "Call back" and callback_at) else "")
+    save_calls({cn: r}, f"{r.get('firm', cn)} -> {outcome}")
+    if outcome in CALL_DONE:  # Finished with: show as contacted in future prospecting searches
+        record_sent({cn: {
+            "company_name": r.get("legal_name", r.get("firm", "")), "to": "", "contact": r.get("contact", ""),
+            "vertical": r.get("sector", ""), "subject": "", "sent_at": stamp, "sent_by": caller,
+            "status": f"Called · {outcome}",
+        }})
+    st.session_state["call_current"] = None
+    st.session_state["call_flash"] = f"{r.get('firm', 'Firm')} logged as {outcome}."
+
+
+def render_call_page() -> None:
+    st.markdown(CALL_CSS, unsafe_allow_html=True)
+    calls = get_call_list()
+    ver = st.session_state.get("call_ver", 0)
+    order = call_queue(calls)
+    caller = get_sender().get("name", "")
+    today = now_uk().date().isoformat()
+    status_counts = {s: sum(1 for r in calls.values() if r.get("status") == s) for s in CALL_STATUSES}
+    due_now = sum(1 for cn in order if calls[cn].get("status") == "Call back")
+    calls_today = sum(1 for r in calls.values() for h in (r.get("history") or []) if str(h.get("at", "")).startswith(today))
+
+    render_html(
+        '<div class="cl-kpis">'
+        f'<div class="cl-kpi" style="--c:#38D6F5"><div class="l">To call now</div><div class="v">{len(order)}</div></div>'
+        f'<div class="cl-kpi" style="--c:#FBBF24"><div class="l">Callbacks due</div><div class="v">{due_now}</div></div>'
+        f'<div class="cl-kpi" style="--c:#7C83FF"><div class="l">Calls today</div><div class="v">{calls_today}</div></div>'
+        f'<div class="cl-kpi" style="--c:#34D399"><div class="l">Interested</div><div class="v">{status_counts["Interested"]}</div></div>'
+        f'<div class="cl-kpi" style="--c:#5E6A82"><div class="l">On the list</div><div class="v">{len(calls)}</div></div>'
+        "</div>"
+    )
+    if st.session_state.get("call_list_error"):
+        st.error(st.session_state.pop("call_list_error"))
+
+    if not calls:
+        with st.container(key="card-call-empty"):
+            render_html(
+                f'<div class="pe-empty"><div style="color:var(--accent-2);display:inline-block;padding:18px;border-radius:20px;'
+                f'background:rgba(56,214,245,.1);border:1px solid rgba(56,214,245,.3)">{icon("phone", 40, 1.6)}</div>'
+                '<div class="t">The call list is empty</div>'
+                '<div class="s">Firms we can phone but not email land here, saved for the whole team.</div>'
+                "<ol><li>In Prospecting, enrich a batch of firms</li><li>Tick firms under <b>&nbsp;No email found</b></li>"
+                "<li>Hit <b>&nbsp;Add to the call list</b></li></ol></div>"
+            )
+        return
+
+    left, right = st.columns([1, 1.35], gap="large")
+
+    # ===== Now calling =====
+    with left:
+        with st.container(key="card-call-now"):
+            section_header("▶", "Now calling", f"{len(order)} in the queue · callbacks first, then new, then retries")
+            if st.session_state.get("call_flash"):
+                st.success(st.session_state.pop("call_flash"))
+            if not caller:
+                st.caption("💡 Add your name under **Your email signature** in the sidebar so calls are logged against you.")
+            if not order:
+                render_html('<div class="pe-hint">Queue clear. Every firm has an outcome or a callback booked for later.</div>')
+            else:
+                current = st.session_state.get("call_current")
+                if current not in order:
+                    current = order[0]
+                pick = st.selectbox(
+                    "Up next", order, index=order.index(current), key=f"call_pick_{ver}",
+                    format_func=lambda c: f"{calls[c].get('firm', c)} · {calls[c].get('status', 'New')}"
+                    + (f" · {fmt_when(calls[c].get('callback', ''))}" if calls[c].get("status") == "Call back" else ""),
+                )
+                st.session_state["call_current"] = pick
+                r = calls[pick]
+                cfg = VERTICAL_PRESETS.get(r.get("sector", ""), VERTICAL_PRESETS["Estate & Lettings Agents"])
+                meta = [chip(r.get("status", "New"), CALL_STATUS_TONE.get(r.get("status", "New"), "")),
+                        chip(r.get("sector", ""), "accent")]
+                if r.get("attempts"):
+                    meta.append(chip(f"{r['attempts']} previous call{'s' if r['attempts'] != 1 else ''}", "muted"))
+                phone = r.get("phone", "")
+                alt = " · ".join(r.get("other_phones") or [])
+                site = r.get("website", "")
+                directors = ", ".join(r.get("directors") or [])
+                render_html(
+                    f'<div class="cl-firm">{esc(r.get("firm", ""))}</div>'
+                    f'<div class="cl-legal">{esc(r.get("legal_name", ""))} · #{esc(pick)}</div>'
+                    f'<div class="pe-chips" style="margin-top:10px">{"".join(meta)}</div>'
+                    f'<div class="cl-phone"><div class="ic">{icon("phone", 20, 2.2)}</div><div>'
+                    f'<a href="tel:{esc(phone.replace(" ", ""))}">{esc(phone or "No number")}</a>'
+                    + (f'<div class="alt">Also: {esc(alt)}</div>' if alt else "")
+                    + "</div></div>"
+                    '<div class="pe-panel"><div class="h">Ask for</div>'
+                    f'<div class="pe-contact"><div class="pe-avatar">{esc(initials(r.get("contact", "?")))}</div>'
+                    f'<div><div class="n">{esc(r.get("contact", ""))}</div><div class="r">{esc(r.get("role", ""))}'
+                    + (f" · directors: {esc(directors)}" if directors else "")
+                    + "</div></div></div>"
+                    + (f'<div class="pe-row" style="margin-top:10px">{icon("globe", 15)}<a href="{esc(site)}" target="_blank">'
+                       f'{esc(site.replace("https://", "").replace("http://", ""))}</a></div>' if site else "")
+                    + (f'<div class="pe-row">{icon("pin", 15)}<span>{esc(r.get("address", ""))}</span></div>' if r.get("address") else "")
+                    + "</div>"
+                    f'<div class="pe-hook"><div class="h">Talking points</div><div class="t">{esc(cfg["primary_hook"])}</div>'
+                    "<ul>" + "".join(f"<li>{esc(b)}</li>" for b in cfg["pitch_bullets"][:3])
+                    + "<li>BT's analogue lines switch off by January 2027, so now is the time to move</li></ul></div>"
+                )
+                hist = list(reversed(r.get("history") or []))[:3]
+                if hist:
+                    render_html(
+                        '<div class="nl-lines-h" style="font-size:.7rem;font-weight:700;letter-spacing:.08em;'
+                        'text-transform:uppercase;color:var(--faint);margin:10px 0 2px 0">Previous calls</div><div class="cl-hist">'
+                        + "".join(
+                            f'<div class="row"><span class="when">{esc(fmt_when(h.get("at", "")))}</span>'
+                            f'<span><b>{esc(h.get("outcome", ""))}</b>{" · " + esc(h.get("by")) if h.get("by") else ""}'
+                            f'{" · " + esc(h.get("note")) if h.get("note") else ""}</span></div>'
+                            for h in hist)
+                        + "</div>"
+                    )
+                notes = st.text_area("Call notes", value=r.get("notes", ""), key=f"call_note_{pick}_{ver}", height=90,
+                                     placeholder="Who you spoke to, current provider, contract end date, number of users…")
+                d1, d2 = st.columns(2)
+                with d1:
+                    cb_day = st.date_input("Call back on", value=now_uk().date() + timedelta(days=1),
+                                           key=f"cb_day_{pick}_{ver}", format="DD/MM/YYYY")
+                with d2:
+                    slots = [dt_time(h, m) for h in range(8, 19) for m in (0, 30) if not (h == 18 and m == 30)]
+                    cb_time = st.selectbox("at", slots, index=slots.index(dt_time(10, 0)), key=f"cb_time_{pick}_{ver}",
+                                           format_func=lambda t: t.strftime("%H:%M"))
+                outcome = None
+                buttons = [
+                    ("✅  Interested", "Interested", "primary", None),
+                    ("📅  Call back", "Call back", "secondary", "Books the date & time above"),
+                    ("📵  No answer", "No answer", "secondary", None),
+                    ("✋  Not interested", "Not interested", "secondary", None),
+                    ("⚠️  Wrong number", "Wrong number", "secondary", None),
+                    ("🚫  Do not call", "Do not call", "secondary", "Never offered again. Use when someone asks not to be contacted."),
+                ]
+                for row_start in range(0, len(buttons), 2):
+                    bcols = st.columns(2)
+                    for bcol, (label, value, kind, tip) in zip(bcols, buttons[row_start:row_start + 2]):
+                        with bcol:
+                            if st.button(label, type=kind, key=f"o_{value.replace(' ', '_').lower()}_{pick}",
+                                         help=tip, **FULL_WIDTH):
+                                outcome = value
+                if outcome:
+                    log_call(pick, outcome, notes, datetime.combine(cb_day, cb_time) if outcome == "Call back" else None)
+                    st.rerun()
+
+    # ===== The whole list =====
+    with right:
+        with st.container(key="card-call-list"):
+            section_header("≡", "The list", "Filter, tweak statuses or notes, then save. Shared with everyone using the app.")
+            f1, f2, f3 = st.columns([1.3, 1.2, 1])
+            with f1:
+                show = st.multiselect("Status", CALL_STATUSES, default=CALL_OPEN, key="call_f_status")
+            with f2:
+                sectors = sorted({r.get("sector", "") for r in calls.values() if r.get("sector")})
+                pick_sec = st.multiselect("Sector", sectors, default=[], key="call_f_sector", placeholder="All sectors")
+            with f3:
+                q = st.text_input("Search", key="call_f_q", placeholder="Firm, contact or phone").strip().lower()
+            rows = []
+            for cn, r in calls.items():
+                if show and r.get("status", "New") not in show:
+                    continue
+                if pick_sec and r.get("sector") not in pick_sec:
+                    continue
+                hay = " ".join([r.get("firm", ""), r.get("contact", ""), r.get("phone", ""), r.get("legal_name", "")]).lower()
+                if q and q not in hay:
+                    continue
+                rows.append({
+                    "cn": cn, "Status": r.get("status", "New"), "Firm": r.get("firm", ""), "Contact": r.get("contact", ""),
+                    "Phone": r.get("phone", ""), "Website": r.get("website", ""),
+                    "Callback": fmt_when(r.get("callback", "")) if r.get("status") == "Call back" else "",
+                    "Calls": int(r.get("attempts") or 0), "Last called": fmt_when(r.get("last_called", "")),
+                    "Notes": r.get("notes", ""),
+                })
+            if not rows:
+                st.caption("No firms match these filters.")
+            else:
+                df = pd.DataFrame(rows)
+                kwargs = dict(
+                    hide_index=True, num_rows="fixed", key=f"call_table_{ver}",
+                    height=min(38 + 35 * len(df), 560),
+                    column_order=["Status", "Firm", "Contact", "Phone", "Website", "Callback", "Calls", "Last called", "Notes"],
+                    disabled=["Firm", "Contact", "Phone", "Website", "Callback", "Calls", "Last called"],
+                    column_config={
+                        "Status": st.column_config.SelectboxColumn("Status", options=CALL_STATUSES, required=True, width="small"),
+                        "Firm": st.column_config.TextColumn("Firm", width="medium"),
+                        "Contact": st.column_config.TextColumn("Contact", width="small"),
+                        "Phone": st.column_config.TextColumn("Phone", width="small"),
+                        "Website": st.column_config.LinkColumn("Website", width="small", display_text="Open ↗"),
+                        "Callback": st.column_config.TextColumn("Callback", width="small"),
+                        "Calls": st.column_config.NumberColumn("Calls", width="small"),
+                        "Last called": st.column_config.TextColumn("Last called", width="small"),
+                        "Notes": st.column_config.TextColumn("Notes (editable)", width="large"),
+                    },
+                )
+                try:
+                    edited = st.data_editor(df, width="stretch", **kwargs)
+                except Exception:
+                    edited = st.data_editor(df, use_container_width=True, **kwargs)
+                changes: Dict[str, Dict[str, Any]] = {}
+                for _, row in edited.iterrows():
+                    orig = calls.get(row["cn"])
+                    if not orig:
+                        continue
+                    if row["Status"] != orig.get("status", "New") or (row["Notes"] or "") != (orig.get("notes") or ""):
+                        changes[row["cn"]] = {"status": row["Status"], "notes": row["Notes"] or ""}
+                s1, s2 = st.columns([1.2, 1])
+                with s1:
+                    if st.button(f"💾  Save {len(changes)} change{'s' if len(changes) != 1 else ''}" if changes else "💾  No changes to save",
+                                 type="primary", disabled=not changes, key="call_save", **FULL_WIDTH):
+                        caller_now = get_sender().get("name", "")
+                        stamp = now_uk().isoformat(timespec="seconds")
+                        updates, handled = {}, {}
+                        for cn, ch in changes.items():
+                            r = dict(calls[cn])
+                            if ch["status"] != r.get("status"):
+                                r["history"] = list(r.get("history") or []) + [
+                                    {"at": stamp, "by": caller_now, "outcome": f"Set to {ch['status']}", "note": ""}]
+                                if ch["status"] in CALL_DONE:
+                                    handled[cn] = {"company_name": r.get("legal_name", ""), "to": "", "contact": r.get("contact", ""),
+                                                   "vertical": r.get("sector", ""), "subject": "", "sent_at": stamp,
+                                                   "sent_by": caller_now, "status": f"Called · {ch['status']}"}
+                            r.update(ch)
+                            updates[cn] = r
+                        save_calls(updates, f"{len(updates)} edited")
+                        if handled:
+                            record_sent(handled)
+                        st.rerun()
+                with s2:
+                    export = pd.DataFrame([{
+                        "Status": r.get("status", ""), "Firm": r.get("firm", ""), "Legal name": r.get("legal_name", ""),
+                        "Company number": cn, "Contact": r.get("contact", ""), "Role": r.get("role", ""),
+                        "Phone": r.get("phone", ""), "Other phones": "; ".join(r.get("other_phones") or []),
+                        "Website": r.get("website", ""), "Sector": r.get("sector", ""), "Address": r.get("address", ""),
+                        "Callback": r.get("callback", ""), "Calls": r.get("attempts", 0),
+                        "Last called": r.get("last_called", ""), "Last called by": r.get("last_called_by", ""),
+                        "Notes": r.get("notes", ""),
+                    } for cn, r in calls.items()])
+                    st.download_button("⬇  Export call list (.csv)", data=export.to_csv(index=False).encode("utf-8-sig"),
+                                       file_name=f"SY_Communications_call_list_{now_uk().strftime('%Y-%m-%d')}.csv",
+                                       mime="text/csv", key="call_export", **FULL_WIDTH)
+
+
+if st.session_state.get("view") == "calls":
+    render_call_page()
+    _calls = get_call_list()
+    _order = call_queue(_calls)
+    render_html(call_hero_html(len(_order), sum(1 for c in _order if _calls[c].get("status") == "Call back"),
+                               sum(1 for r in _calls.values() if r.get("status") == "Interested")), target=hero_slot)
+    render_html(
+        '<div class="pe-stats">'
+        f'<div class="pe-stat"><div class="v">{len(_calls)}</div><div class="l">On list</div></div>'
+        f'<div class="pe-stat"><div class="v">{len(_order)}</div><div class="l">To call</div></div>'
+        f'<div class="pe-stat"><div class="v">{len(get_sent_log())}</div><div class="l">Handled</div></div>'
+        "</div>",
+        target=sidebar_stats_slot,
+    )
+    st.stop()
+
 
 
 col_left, col_right = st.columns([1.08, 0.92], gap="large")
@@ -3310,9 +3759,10 @@ if queue:
             st.caption("Every enriched firm has an email address.")
         else:
             st.caption(
-                "Phone these from the call list, type an email if you know one (the firm moves up to Ready to"
-                " email), or paste their real website and hit Retry."
+                "Send these to the shared call list for a telemarketer to work through, type an email if you"
+                " know one (the firm moves up to Ready to email), or paste their real website and hit Retry."
             )
+            calls_now = get_call_list()
             ndf = pd.DataFrame([{
                 "cn": c,
                 "Select": bool(queue[c]["include"]),
@@ -3322,7 +3772,7 @@ if queue:
                 "Phone": (queue[c]["lead"].phones_found or [""])[0],
                 "Email": "",
                 "Website": queue[c].get("website_input") or (queue[c]["lead"].website_url or ""),
-                "Why": ("No website" if not queue[c]["lead"].website_url
+                "Why": ("📞 In call list" if c in calls_now else "No website" if not queue[c]["lead"].website_url
                         else "No email on site"),
             } for c in noemail_all])
             edited = _data_editor(
@@ -3347,6 +3797,24 @@ if queue:
                 c for c in noemail_sel
                 if queue[c].get("website_input") and domain_of(queue[c]["website_input"]) != domain_of(queue[c]["lead"].website_url or "")
             ]
+            to_call = [c for c in noemail_sel if c not in calls_now and queue[c]["lead"].phones_found]
+            no_phone = [c for c in noemail_sel if c not in calls_now and not queue[c]["lead"].phones_found]
+            if st.button(
+                f"📞  Add {len(to_call)} to the call list" if to_call else "📞  Nothing new to add to the call list",
+                type="primary", disabled=not to_call, key="add_to_calls", **FULL_WIDTH,
+                help="Saves the selected firms (contact, phone and verified website) to the shared call list page.",
+            ):
+                save_calls({c: call_record_from_item(queue[c]) for c in to_call}, f"{len(to_call)} added")
+                for c in to_call:
+                    queue[c]["include"] = False
+                bump_queue_editor()
+                st.session_state["calls_flash"] = f"{len(to_call)} firms added to the call list."
+                st.rerun()
+            if st.session_state.get("calls_flash"):
+                st.success(st.session_state.pop("calls_flash") + " Open **Call list** in the sidebar to start calling.")
+            if no_phone:
+                st.caption(f"💡 {len(no_phone)} selected {'firm has' if len(no_phone) == 1 else 'firms have'} no phone number,"
+                           " so can't go on the call list. Paste their website and hit Retry to look again.")
             n1, n2, n3 = st.columns(3)
             with n1:
                 if st.button(f"🔁  Retry {len(retry_ids)} with new website", disabled=not retry_ids, **FULL_WIDTH,
