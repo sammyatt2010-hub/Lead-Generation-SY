@@ -2388,8 +2388,14 @@ class SentLog:
         if resp.status_code != 200:
             raise RuntimeError(self._describe(resp.status_code))
         payload = resp.json()
-        content = base64.b64decode(payload.get("content", "") or b"").decode("utf-8") or "{}"
-        return json.loads(content), payload.get("sha")
+        content = base64.b64decode(payload.get("content", "") or b"").decode("utf-8-sig").strip()
+        if not content or content in ("[]", "null"):
+            return {}, payload.get("sha")  # Emptied by hand on GitHub: treat as a fresh start
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"{self.path} on GitHub isn't valid JSON. Replace its contents with {{}} to start fresh.")
+        return (data if isinstance(data, dict) else {}), payload.get("sha")
 
     def _gh_write(self, data: Dict[str, Any], sha: Optional[str], message: str) -> int:
         body: Dict[str, Any] = {
@@ -2414,7 +2420,8 @@ class SentLog:
     def _local_read(self) -> Dict[str, Any]:
         try:
             with open(self.local_path, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                data = json.load(fh)
+                return data if isinstance(data, dict) else {}
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
