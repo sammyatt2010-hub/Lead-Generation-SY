@@ -21,6 +21,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ==========================================
 # DESIGN SYSTEM (theme, CSS & HTML components)
@@ -1814,9 +1815,18 @@ def lead_display_name(lead: "ScrapedLead") -> str:
     return friendly_company_name(lead.company_name)
 
 
+def looks_like_company_name(name: str) -> bool:
+    """True if someone typed the company (e.g. 'SYComms', 'SY Comms') where their own name goes."""
+    flat = re.sub(r"[^a-z]", "", (name or "").lower())
+    return bool(flat) and (flat.startswith("sycom") or flat in ("sy", "sycommunications", "sycomms", "sycoms")
+                           or "communications" in flat)
+
+
 def get_sender() -> Dict[str, str]:
     sender = dict(SENDER_DEFAULTS)
     sender.update({k: v for k, v in st.session_state.get("sender_profile", {}).items() if v})
+    if looks_like_company_name(sender.get("name", "")):
+        sender["name"] = ""  # Sign as the company, never "I'm SYComms from SY Communications"
     return sender
 
 
@@ -1857,7 +1867,7 @@ def build_email_pitch(
     crms = config["crms"]
     crms_str = ", ".join(crms[:2]) + f" or {crms[2]}" if len(crms) >= 3 else " or ".join(crms)
 
-    who = f"I'm {sender['name']} from {SENDER_COMPANY}" if sender.get("name") else f"I'm getting in touch from {SENDER_COMPANY}"
+    who = f"I'm {sender['name']} from {SENDER_COMPANY}" if sender.get("name") else f"It's {SENDER_COMPANY} here"
     bullets = "\n".join(f"- {title}" for title, _ in copy["outcomes"][:4])
 
     parts = [
@@ -1881,8 +1891,8 @@ def build_email_pitch(
     return "\n\n".join(parts)
 
 
-def _email_body_html(body: str) -> str:
-    """Turns the plain-text email into simple, clean HTML (paragraphs, bullet list, signature)."""
+def _email_plain_html(body: str) -> str:
+    """Plain look: the email as simple paragraphs, bullets and signature (like a personal email)."""
     blocks, out = [b for b in body.replace("\r\n", "\n").split("\n\n")], []
     for block in blocks:
         lines = [l for l in block.split("\n") if l.strip() != ""] or [""]
@@ -1899,6 +1909,145 @@ def _email_body_html(body: str) -> str:
         '<html><body style="font-family:Calibri,Arial,sans-serif;font-size:14px;line-height:1.45;color:#1f2937">'
         + "".join(out) + "</body></html>"
     )
+
+
+def _hex(rgb: Tuple[int, int, int]) -> str:
+    return "#%02x%02x%02x" % rgb
+
+
+def _email_branded_html(body: str, subject: str = "") -> str:
+    """Branded look: SY Communications header, feature tiles, switch-off callout, a demo button and a
+    proper signature. Built from the (editable) plain-text email, using tables and inline styles only,
+    so it renders in Outlook, Gmail, Apple Mail and Zoho alike. No images, so nothing is blocked."""
+    purple, purple2, teal = _hex(BRAND_PURPLE), _hex(BRAND_PURPLE_2), _hex(BRAND_TEAL)
+    font = "font-family:'Segoe UI',Calibri,Arial,Helvetica,sans-serif"
+    sender = get_sender()
+    e = html_lib.escape
+    blocks = [b.strip("\n") for b in body.replace("\r\n", "\n").split("\n\n")]
+    rows: List[str] = []
+    sig_lines: List[str] = []
+    ps = ""
+    in_sig = False
+
+    def para(text: str, extra: str = "") -> str:
+        inner = "<br>".join(e(l) for l in text.split("\n"))
+        return (f'<tr><td style="padding:0 36px 16px 36px;{font};font-size:15px;line-height:1.6;color:#1f2937;{extra}">'
+                f"{inner}</td></tr>")
+
+    for block in blocks:
+        if not block.strip():
+            continue
+        first = block.lstrip()
+        if first.startswith("P.S."):
+            ps = block
+            continue
+        if in_sig or first.lower().startswith(("kind regards", "best regards", "many thanks", "regards")):
+            in_sig = True
+            sig_lines += [l for l in block.split("\n") if l.strip()]
+            continue
+        lines = [l for l in block.split("\n") if l.strip()]
+        if lines and all(l.lstrip().startswith("- ") for l in lines):
+            items = [l.lstrip()[2:] for l in lines]
+            cells = ""
+            for i in range(0, len(items), 2):
+                pair = items[i:i + 2]
+                tds = "".join(
+                    f'<td width="50%" valign="top" style="padding:5px">'
+                    f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>'
+                    f'<td style="background:#f4f2fb;border-left:4px solid {teal};border-radius:6px;padding:12px 14px;'
+                    f'{font};font-size:14px;font-weight:600;color:{purple}">'
+                    f'<span style="color:{teal};font-weight:700">&#10003;</span>&nbsp; {e(it)}</td></tr></table></td>'
+                    for it in pair)
+                if len(pair) == 1:
+                    tds += '<td width="50%"></td>'
+                cells += f"<tr>{tds}</tr>"
+            rows.append(f'<tr><td style="padding:0 31px 14px 31px"><table role="presentation" width="100%" '
+                        f'cellpadding="0" cellspacing="0" border="0">{cells}</table></td></tr>')
+            continue
+        low = first.lower()
+        if "analogue" in low and "2027" in low:
+            rows.append(
+                f'<tr><td style="padding:2px 36px 18px 36px"><table role="presentation" width="100%" cellpadding="0" '
+                f'cellspacing="0" border="0"><tr><td style="background:#fff7e8;border:1px solid #f5c26b;border-radius:8px;'
+                f'padding:14px 16px;{font};font-size:14px;line-height:1.55;color:#7a4b00">'
+                f'<strong style="color:#b45309">&#9200; BT switch-off: January 2027</strong><br>{e(block)}</td></tr></table></td></tr>')
+            continue
+        if low.startswith("worth a quick") or ("demo" in low and "?" in first and len(first) < 260):
+            head, _, rest = first.partition("?")
+            href = _secret_value("DEMO_BOOKING_URL") or (
+                f"mailto:{sender.get('email', '')}?subject={quote('Demo request: ' + (subject or 'phone system'))}")
+            label = "Book a 15-minute demo" if "15" in head else "Book a quick demo"
+            rows.append(
+                f'<tr><td align="center" style="padding:8px 36px 6px 36px">'
+                f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+                f'<td align="center" bgcolor="{teal}" style="border-radius:8px">'
+                f'<a href="{e(href)}" style="display:inline-block;padding:13px 30px;{font};font-size:15px;font-weight:700;'
+                f'color:#ffffff;text-decoration:none;border-radius:8px">{label} &rarr;</a></td></tr></table></td></tr>')
+            if rest.strip():
+                rows.append(para(rest.strip(), "text-align:center;font-size:14px;color:#4b5563;padding-top:10px"))
+            continue
+        if low.startswith("i've attached"):
+            rows.append(para("\U0001F4CE " + block, "font-size:14px;color:#4b5563"))
+            continue
+        rows.append(para(block))
+
+    # Signature block
+    sig_html = ""
+    if sig_lines:
+        closing, rest_lines = sig_lines[0], sig_lines[1:]
+        name_lines = [l for l in rest_lines if l.strip() != SENDER_COMPANY and "|" not in l and "www." not in l]
+        contact = next((l for l in rest_lines if "|" in l), "")
+        site = next((l for l in rest_lines if "www." in l), "")
+        who = "".join(
+            f'<div style="{font};font-size:{15 if i == 0 else 13}px;font-weight:{700 if i == 0 else 400};'
+            f'color:{purple if i == 0 else "#4b5563"}">{e(l)}</div>' for i, l in enumerate(name_lines))
+        site_html = (f'<a href="https://{e(site.strip().replace("https://", "").replace("http://", ""))}" '
+                     f'style="color:{teal};text-decoration:none;font-weight:600">{e(site.strip())}</a>' if site else "")
+        sig_html = (
+            f'<tr><td style="padding:10px 36px 26px 36px">'
+            f'<div style="{font};font-size:15px;color:#1f2937;margin-bottom:12px">{e(closing)}</div>'
+            f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td style="border-left:3px solid {teal};padding:2px 0 2px 14px">{who}'
+            f'<div style="{font};font-size:14px;font-weight:700;color:{purple};margin-top:{4 if who else 0}px">{e(SENDER_COMPANY)}</div>'
+            f'<div style="{font};font-size:13px;color:#4b5563;margin-top:2px">{e(contact)}</div>'
+            f'<div style="{font};font-size:13px;margin-top:2px">{site_html}</div>'
+            f"</td></tr></table></td></tr>")
+
+    header = (
+        f'<tr><td bgcolor="{purple}" style="background:{purple};padding:22px 36px;border-radius:12px 12px 0 0">'
+        f'<div style="{font};font-size:20px;font-weight:800;color:#ffffff;letter-spacing:.2px">'
+        f'SY <span style="color:{teal}">Communications</span></div>'
+        f'<div style="{font};font-size:12px;color:#c9c3ec;margin-top:3px">Business phones that work with your software</div>'
+        f'</td></tr>'
+        f'<tr><td height="4" bgcolor="{teal}" style="background:{teal};font-size:0;line-height:0">&nbsp;</td></tr>'
+        f'<tr><td style="padding:28px 0 0 0;font-size:0;line-height:0">&nbsp;</td></tr>'
+    )
+    footer = (
+        f'<tr><td style="padding:14px 36px 0 36px;{font};font-size:12px;line-height:1.5;color:#8a8fa3">{e(ps)}</td></tr>'
+        if ps else "")
+    address = SENDER_DEFAULTS.get("address", "")
+    return (
+        '<html><body style="margin:0;padding:0;background:#f1f0f7">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#f1f0f7" '
+        'style="background:#f1f0f7"><tr><td align="center" style="padding:24px 12px">'
+        '<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" '
+        'style="width:100%;max-width:600px">'
+        '<tr><td><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#ffffff" '
+        f'style="background:#ffffff;border-radius:12px;border:1px solid #e4e1f0">{header}{"".join(rows)}{sig_html}</table></td></tr>'
+        f"{footer}"
+        + (f'<tr><td style="padding:6px 36px 0 36px;{font};font-size:11px;color:#a3a7b8">{e(SENDER_COMPANY)} · {e(address)}</td></tr>'
+           if address else "")
+        + "</table></td></tr></table></body></html>"
+    )
+
+
+def _email_body_html(body: str, subject: str = "") -> str:
+    """The HTML version of an email: branded (default) or plain, per the 'Branded email design' switch."""
+    try:
+        branded = st.session_state.get("opt_branded", True)
+    except Exception:
+        branded = True
+    return _email_branded_html(body, subject) if branded else _email_plain_html(body)
 
 
 def build_eml_draft(
@@ -1919,7 +2068,7 @@ def build_eml_draft(
     msg["Date"] = formatdate(localtime=True)
     msg["X-Unsent"] = "1"  # Tells Outlook to open this as a new draft, not a received email
     msg.set_content(body.replace("\r\n", "\n"))
-    msg.add_alternative(_email_body_html(body), subtype="html")
+    msg.add_alternative(_email_body_html(body, subject or ""), subtype="html")
     for filename, data in attachments or []:
         msg.add_attachment(data, maintype="application", subtype="pdf", filename=filename)
     return msg.as_bytes()
@@ -2607,7 +2756,7 @@ for _k, _v in {"stat_searches": 0, "stat_firms": 0, "stat_dossiers": 0}.items():
 hero_slot = st.empty()  # Filled at the end so the progress stepper reflects this run's actions
 MAX_BATCH = 25
 SENT_LOG = SentLog()
-for _k, _v in {"opt_attach": True, "opt_switch": True, "queue_editor_ver": 0, "sent_log_ver": 0}.items():
+for _k, _v in {"opt_branded": True, "opt_attach": True, "opt_switch": True, "queue_editor_ver": 0, "sent_log_ver": 0}.items():
     st.session_state.setdefault(_k, _v)
 
 
@@ -3020,7 +3169,10 @@ with st.sidebar:
             "phone": _secret("SENDER_PHONE", SENDER_DEFAULTS["phone"]),
             "email": _secret("SENDER_EMAIL", SENDER_DEFAULTS["email"]),
         })
-        prof["name"] = st.text_input("Your name", value=prof.get("name", ""), placeholder="e.g. Sam")
+        prof["name"] = st.text_input("Your name", value=prof.get("name", ""), placeholder="e.g. Sam",
+                                     help="Leave blank to send as the company: \"Hi Mike, it's SY Communications here.\"")
+        if not get_sender().get("name"):
+            st.caption("No name set: emails open \"It's SY Communications here\" and are signed by the company.")
         prof["title"] = st.text_input("Job title", value=prof.get("title", ""))
         prof["phone"] = st.text_input("Direct phone", value=prof.get("phone", ""))
         prof["email"] = st.text_input("Your email", value=prof.get("email", ""))
@@ -3709,6 +3861,10 @@ with col_right:
                 with o2:
                     st.session_state["opt_switch"] = st.toggle(
                         "Mention Jan 2027 switch-off", value=st.session_state["opt_switch"], key="w_opt_switch")
+                st.session_state["opt_branded"] = st.toggle(
+                    "Branded email design", value=st.session_state["opt_branded"], key="w_opt_branded",
+                    help="On: SY Communications header, feature tiles, switch-off callout and a demo button."
+                         " Off: a plain, personal-looking email. Applies to drafts and Zoho sends.")
                 attach_overview = st.session_state["opt_attach"]
 
                 ensure_draft(item)
@@ -3728,6 +3884,8 @@ with col_right:
                 item.update(to=email_to, subject=email_subject, body=edited_pitch)
                 if lead.emails_found and len(lead.emails_found) > 1:
                     st.caption("Other addresses found: " + ", ".join(e for e in lead.emails_found if e != email_to))
+                with st.expander("👀  Preview the email as they'll see it"):
+                    components.html(_email_body_html(edited_pitch, email_subject), height=820, scrolling=True)
 
                 mailto_url = build_mailto(email_to, email_subject, edited_pitch)
                 friendly = draft_filename_part(lead.company_name)
