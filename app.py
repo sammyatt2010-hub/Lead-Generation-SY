@@ -276,6 +276,16 @@ hr { border-color: var(--border) !important; }
 [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) { border-color: rgba(124,131,255,.55); background: var(--accent-soft); }
 [data-testid="stSidebar"] [role="radiogroup"] label p { font-weight: 600 !important; font-size: .88rem !important; color: var(--text) !important;
   text-transform: none !important; letter-spacing: 0 !important; }
+/* LinkedIn panel */
+.st-key-card-linkedin { background: var(--surface); border: 1px solid rgba(10,102,194,.45) !important; border-radius: 12px;
+  padding: 14px 14px 10px 14px; margin-bottom: 10px; }
+.li-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.li-head .t { font-weight: 700; color: var(--text); font-size: .95rem; }
+.li-head .s { font-size: .8rem; color: var(--muted); margin-top: 1px; }
+.li-badge { width: 30px; height: 30px; border-radius: 7px; background: #0A66C2; color: #fff; font-weight: 800; font-size: .95rem;
+  display: grid; place-items: center; flex-shrink: 0; font-family: Arial, sans-serif; }
+.li-mini { width: 15px; height: 15px; border-radius: 3px; background: #0A66C2; color: #fff; font-weight: 800; font-size: .62rem;
+  display: grid; place-items: center; flex-shrink: 0; font-family: Arial, sans-serif; }
 /* Sidebar components */
 .pe-brand { display: flex; align-items: center; gap: 12px; padding: 4px 0 18px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
 .pe-logo { width: 40px; height: 40px; border-radius: 12px; background: var(--grad); display: grid; place-items: center; color: #0A0E1A;
@@ -567,6 +577,10 @@ class ScrapedLead(BaseModel):
     officers: List[OfficerInfo] = Field(default_factory=list)
     site_meta_description: Optional[str] = None
     trading_name: Optional[str] = None  # From Google Maps, e.g. "J Dent Dental Care"
+    contact_name: Optional[str] = None  # Added by a person after checking LinkedIn etc.
+    contact_role: Optional[str] = None
+    contact_email: Optional[str] = None
+    linkedin_url: Optional[str] = None
     website_confidence: Optional[str] = None  # High / Medium / Low / Manual
     website_reasons: List[str] = Field(default_factory=list)
     discovery_notes: List[str] = Field(default_factory=list)
@@ -1613,6 +1627,8 @@ def first_name_from_email(email: str) -> Optional[str]:
 
 def pick_primary_email(lead: "ScrapedLead", first_name: Optional[str] = None) -> Optional[str]:
     """The best single email for the dossier: the contact's own inbox, else the main inbox."""
+    if getattr(lead, "contact_email", None):
+        return lead.contact_email
     if not lead.emails_found:
         return None
     if first_name:
@@ -1633,6 +1649,13 @@ def infer_contact_name_and_role(
     vert_cfg = VERTICAL_PRESETS.get(
         vertical_key, VERTICAL_PRESETS["Estate & Lettings Agents"]
     )
+
+    # 0. A contact a person has confirmed (e.g. via LinkedIn) always wins
+    manual = (getattr(lead, "contact_name", None) or "").strip()
+    if manual:
+        first = re.sub(r"[^A-Za-z'\-]", "", manual.split()[0]) if manual.split() else ""
+        if first:
+            return first[:1].upper() + first[1:], (getattr(lead, "contact_role", None) or "Confirmed contact")
 
     # 1. Primary Officer match — only real people in decision-making roles
     officer = pick_decision_maker(lead.officers)
@@ -2661,6 +2684,7 @@ def call_record_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "phone": (lead.phones_found or [""])[0],
         "other_phones": lead.phones_found[1:3],
         "website": website,
+        "linkedin": getattr(lead, "linkedin_url", None) or "",
         "sector": item["vertical"],
         "address": lead.registered_address or "",
         "added_at": now_uk().isoformat(timespec="seconds"),
@@ -2704,6 +2728,93 @@ def fmt_when(iso: str, with_time: bool = True) -> str:
     return d.strftime("%d %b %H:%M" if with_time else "%d %b").lstrip("0")
 
 
+# ------------------------------------------------------------------
+# CONFIRMED CONTACTS (found by a person, e.g. on LinkedIn; saved permanently)
+# ------------------------------------------------------------------
+CONTACTS_STORE = SentLog("GITHUB_CONTACTS_PATH", "contacts.json", ".contacts.json")
+
+
+def get_contacts() -> Dict[str, Any]:
+    if "contacts_data" not in st.session_state:
+        st.session_state["contacts_data"] = CONTACTS_STORE.load()
+    return st.session_state["contacts_data"]
+
+
+def apply_contact(item: Dict[str, Any], rec: Dict[str, Any]) -> None:
+    """Puts a confirmed contact onto a queued firm: greeting, role, LinkedIn and (if given) email."""
+    lead: ScrapedLead = item["lead"]
+    lead.contact_name = (rec.get("name") or "").strip() or None
+    lead.contact_role = (rec.get("role") or "").strip() or None
+    lead.linkedin_url = (rec.get("linkedin") or "").strip() or None
+    email = clean_email(rec.get("email") or "") if rec.get("email") else None
+    lead.contact_email = email
+    if email:
+        if email not in lead.emails_found:
+            lead.emails_found = [email] + list(lead.emails_found)
+        if item.get("to") != email:
+            item["to"] = email
+            item["to_ver"] = item.get("to_ver", 0) + 1
+    item["sig"] = None  # Rebuild the draft with the new greeting
+
+
+def save_contact(cn: str, name: str = "", role: str = "", linkedin: str = "", email: str = "") -> Optional[str]:
+    """Saves a confirmed contact permanently and applies it. Returns an error message or None."""
+    email = (email or "").strip()
+    if email and not clean_email(email):
+        return f"'{email}' doesn't look like a valid email address."
+    current = dict(get_contacts().get(cn) or {})
+    rec = {
+        "name": (name or "").strip() or current.get("name", ""),
+        "role": (role or "").strip() or current.get("role", ""),
+        "linkedin": (linkedin or "").strip() or current.get("linkedin", ""),
+        "email": clean_email(email) if email else current.get("email", ""),
+        "updated_at": now_uk().isoformat(timespec="seconds"),
+        "updated_by": get_sender().get("name", ""),
+    }
+    item = st.session_state.get("queue", {}).get(cn)
+    if item:
+        rec["firm"] = item["lead"].company_name
+    try:
+        st.session_state["contacts_data"] = CONTACTS_STORE.apply({cn: rec}, "contact updated")
+    except Exception:
+        st.session_state.setdefault("contacts_data", {})[cn] = rec
+    if item:
+        apply_contact(item, rec)
+    bump_queue_editor()
+    return None
+
+
+def linkedin_people_url(lead: ScrapedLead) -> str:
+    officer = pick_decision_maker(lead.officers)
+    person = display_officer_name(officer.name) if officer else "director"
+    return "https://www.linkedin.com/search/results/people/?keywords=" + quote(f"{person} {lead_display_name(lead)}")
+
+
+def linkedin_company_url(lead: ScrapedLead) -> str:
+    return "https://www.linkedin.com/search/results/companies/?keywords=" + quote(lead_display_name(lead))
+
+
+def suggest_email(full_name: str, lead: ScrapedLead) -> Optional[str]:
+    """If the firm's own website shows how staff emails are formed, apply that to a new name.
+    e.g. site lists sarah.jones@firm.co.uk -> 'Mark Hughes' becomes mark.hughes@firm.co.uk. Unverified."""
+    words = [re.sub(r"[^a-z]", "", w.lower()) for w in (full_name or "").split()]
+    words = [w for w in words if w]
+    if not words or not lead.website_url or lead.website_confidence not in ("High", "Medium", "Manual"):
+        return None
+    site = domain_of(lead.website_url) or ""
+    own = [e for e in lead.emails_found if e.split("@", 1)[1] == site or e.split("@", 1)[1].endswith("." + site)]
+    first, last = words[0], (words[-1] if len(words) > 1 else "")
+    for e in own:
+        local, dom = e.split("@", 1)
+        if re.fullmatch(r"[a-z]+\.[a-z]+", local) and last:
+            return f"{first}.{last}@{dom}"
+    for e in own:
+        local, dom = e.split("@", 1)
+        if first_name_from_email(e) and re.fullmatch(r"[a-z]+", local):
+            return f"{first}@{dom}"
+    return None
+
+
 def sent_record(item: Dict[str, Any]) -> Dict[str, Any]:
     lead: ScrapedLead = item["lead"]
     return {
@@ -2735,6 +2846,9 @@ def add_to_queue(lead: ScrapedLead, vertical: str) -> None:
     }
     if cn not in order:
         order.append(cn)
+    stored = get_contacts().get(cn)
+    if stored:
+        apply_contact(queue[cn], stored)
     bump_queue_editor()
 
 
@@ -2794,7 +2908,8 @@ def run_enrichment(
 def ensure_draft(item: Dict[str, Any]) -> None:
     """(Re)builds a firm's subject/body when first needed or when options/signature change."""
     sig = (item["vertical"], st.session_state["opt_attach"], st.session_state["opt_switch"],
-           tuple(sorted(get_sender().items())))
+           tuple(sorted(get_sender().items())),
+           getattr(item["lead"], "contact_name", None), getattr(item["lead"], "contact_role", None))
     if item.get("sig") != sig or item.get("body") is None:
         item["subject"] = build_email_subject(item["lead"], item["vertical"])
         item["body"] = build_email_pitch(
@@ -2878,6 +2993,7 @@ with st.sidebar:
     if st.button("↻ Refresh shared data", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
         st.session_state.pop("sent_log_data", None)
         st.session_state.pop("call_list_data", None)
+        st.session_state.pop("contacts_data", None)
         st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
         st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
         bump_queue_editor()
@@ -3065,6 +3181,10 @@ def render_call_page() -> None:
                     "<ul>" + "".join(f"<li>{esc(b)}</li>" for b in cfg["pitch_bullets"][:3])
                     + "<li>BT's analogue lines switch off by January 2027, so now is the time to move</li></ul></div>"
                 )
+                li_q = f"{(r.get('directors') or [r.get('contact', '')])[0]} {r.get('firm', '')}"
+                st.link_button("🔎  Find on LinkedIn", r.get("linkedin") or
+                               "https://www.linkedin.com/search/results/people/?keywords=" + quote(li_q),
+                               **FULL_WIDTH, help="Check who you're calling before you dial")
                 hist = list(reversed(r.get("history") or []))[:3]
                 if hist:
                     render_html(
@@ -3440,7 +3560,9 @@ with col_right:
                 f'<div class="meta">{"".join(meta)}</div>{blurb}</div></div>'
             )
 
-            if not lead.website_url:
+            if not lead.website_url and getattr(lead, "contact_email", None):
+                pass  # A person has confirmed the contact, so the missing website no longer matters
+            elif not lead.website_url:
                 st.warning(
                     "Couldn't confidently find this firm's website. Tick just this firm on the left,"
                     " paste its website and re-run to pull contacts."
@@ -3478,14 +3600,70 @@ with col_right:
                     '<span class="tag">Reg. office</span></div>'
                     if lead.registered_address else ""
                 )
+                li_row = (
+                    f'<div class="pe-row"><span class="li-mini">in</span><a class="trunc" href="{esc(lead.linkedin_url)}" target="_blank">'
+                    'LinkedIn profile</a></div>' if getattr(lead, "linkedin_url", None) else ""
+                )
                 render_html(
                     '<div class="pe-panel"><div class="h">Decision-maker</div>'
                     f'<div class="pe-contact"><div class="pe-avatar">{esc(initials(contact_name))}</div>'
                     f'<div><div class="n">{esc(contact_name)}</div><div class="r">{esc(contact_role)}</div></div></div>'
-                    f'<div style="margin-top:12px">{site_row}{addr_row}</div></div>'
+                    f'<div style="margin-top:12px">{site_row}{addr_row}{li_row}</div></div>'
                     '<div class="pe-panel"><div class="h">Channels</div><div class="pe-cols">'
                     f'<div>{email_rows}</div><div>{phone_rows}</div></div></div>'
                 )
+
+                # ---- LinkedIn: a person looks, then brings the right contact back ----
+                with st.container(key="card-linkedin"):
+                    have = bool(getattr(lead, "contact_name", None))
+                    render_html(
+                        '<div class="li-head"><span class="li-badge">in</span><div><div class="t">'
+                        + ("Contact confirmed" if have else "Find the right person on LinkedIn")
+                        + '</div><div class="s">'
+                        + (f"{esc(lead.contact_name)}{' · ' + esc(lead.contact_role) if lead.contact_role else ''}"
+                           f"{' · updated by ' + esc(get_contacts().get(cn, {}).get('updated_by')) if get_contacts().get(cn, {}).get('updated_by') else ''}"
+                           if have else "Search in your own LinkedIn, then paste who you find below. The email and PDF update instantly.")
+                        + "</div></div></div>"
+                    )
+                    lk1, lk2 = st.columns(2)
+                    with lk1:
+                        st.link_button("🔎  Find people on LinkedIn", linkedin_people_url(lead), **FULL_WIDTH,
+                                       help="Opens LinkedIn in a new tab, searching for the director at this firm")
+                    with lk2:
+                        st.link_button("🏢  Company page", linkedin_company_url(lead), **FULL_WIDTH)
+                    with st.form(key=f"li_form_{cn}", border=False):
+                        a1, a2 = st.columns(2)
+                        with a1:
+                            f_name = st.text_input("Contact name", value=getattr(lead, "contact_name", None) or "",
+                                                   placeholder="e.g. Sarah Jones")
+                        with a2:
+                            f_role = st.text_input("Job title", value=getattr(lead, "contact_role", None) or "",
+                                                   placeholder="e.g. Practice Manager")
+                        a3, a4 = st.columns(2)
+                        with a3:
+                            f_li = st.text_input("LinkedIn profile link", value=getattr(lead, "linkedin_url", None) or "",
+                                                 placeholder="https://www.linkedin.com/in/…")
+                        with a4:
+                            hint = suggest_email(getattr(lead, "contact_name", None) or "", lead)
+                            f_email = st.text_input("Business email (if known)", value=getattr(lead, "contact_email", None) or "",
+                                                    placeholder=f"Likely: {hint}" if hint else "name@firm.co.uk")
+                        saved = st.form_submit_button("Save contact", type="primary", **FULL_WIDTH)
+                    if hint and not getattr(lead, "contact_email", None):
+                        st.caption(f"💡 Their website uses addresses like this, so **{hint}** is likely, but unverified."
+                                   " Only use it if you're comfortable it's right.")
+                    elif getattr(lead, "contact_name", None) is None:
+                        st.caption("Tip: type the name and save first. If their website shows how emails are formed,"
+                                   " a likely address will be suggested.")
+                    if saved:
+                        err = save_contact(cn, f_name, f_role, f_li, f_email)
+                        if err:
+                            st.error(err)
+                        else:
+                            st.session_state["li_flash"] = "Contact saved" + (
+                                ". This firm is now in Ready to email." if f_email.strip() else ".")
+                            st.rerun()
+                    if st.session_state.get("li_flash"):
+                        st.success(st.session_state.pop("li_flash"))
 
                 # Officers + integration hook
                 officer_rows = "".join(
@@ -3660,9 +3838,23 @@ def _apply_editor(edited: pd.DataFrame, log_now: Dict[str, Any]) -> None:
             continue
         if "Select" in row:
             queue[c]["include"] = bool(row["Select"])
+        if "Contact" in row:
+            shown = infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0]
+            new_name = str(row["Contact"] or "").strip()
+            if new_name and new_name != shown:
+                save_contact(c, name=new_name)
+                moved = True
         if "Email" in row:
             new_to = str(row["Email"] or "").strip()
             if new_to != queue[c]["to"]:
+                if bool(new_to) != bool(queue[c]["to"]):
+                    moved = True  # Firm changes group: redraw straight away
+                if new_to:
+                    err = save_contact(c, email=new_to)  # Saved permanently, like LinkedIn finds
+                    if err:
+                        st.session_state["table_error"] = err
+                        moved = True
+                        continue
                 moved = moved or (bool(new_to) != bool(queue[c]["to"]))
                 queue[c]["to"] = new_to
                 queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
@@ -3717,19 +3909,21 @@ if queue:
                 "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
                 "Email": queue[c]["to"],
                 "Phone": (queue[c]["lead"].phones_found or [""])[0],
+                "LinkedIn": getattr(queue[c]["lead"], "linkedin_url", None) or linkedin_people_url(queue[c]["lead"]),
                 "Website match": _website_label(queue[c]["lead"]),
             } for c in ready_all])
             edited = _data_editor(
                 rdf, hide_index=True, num_rows="fixed", key=f"q_ready_{ver}",
                 height=min(38 + 35 * len(rdf), 390),
-                column_order=["Select", "Handled", "Firm", "Contact", "Email", "Phone", "Website match"],
-                disabled=["Firm", "Contact", "Phone", "Website match"],
+                column_order=["Select", "Handled", "Firm", "Contact", "Email", "LinkedIn", "Phone", "Website match"],
+                disabled=["Firm", "Phone", "LinkedIn", "Website match"],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", width="small"),
                     "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once emailed. Saved permanently."),
                     "Firm": st.column_config.TextColumn("Firm", width="medium"),
-                    "Contact": st.column_config.TextColumn("Contact", width="small"),
-                    "Email": st.column_config.TextColumn("Email (editable)", width="medium", help="Clear it to move the firm to No email found"),
+                    "Contact": st.column_config.TextColumn("Contact ✎", width="small", help="Type the right first name or full name. Saved permanently."),
+                    "Email": st.column_config.TextColumn("Email ✎", width="medium", help="Clear it to move the firm to No email found"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="small", display_text="Find ↗"),
                     "Phone": st.column_config.TextColumn("Phone", width="small"),
                     "Website match": st.column_config.TextColumn("Website", width="small"),
                 },
@@ -3759,9 +3953,12 @@ if queue:
             st.caption("Every enriched firm has an email address.")
         else:
             st.caption(
-                "Send these to the shared call list for a telemarketer to work through, type an email if you"
-                " know one (the firm moves up to Ready to email), or paste their real website and hit Retry."
+                "Click **Find ↗** to look the firm up on LinkedIn, then type the right contact and business email"
+                " straight into the row: the firm moves up to Ready to email with a personalised draft. Or send them"
+                " to the shared call list, or paste their real website and hit Retry."
             )
+            if st.session_state.get("table_error"):
+                st.error(st.session_state.pop("table_error"))
             calls_now = get_call_list()
             ndf = pd.DataFrame([{
                 "cn": c,
@@ -3770,6 +3967,7 @@ if queue:
                 "Firm": lead_display_name(queue[c]["lead"]),
                 "Contact": infer_contact_name_and_role(queue[c]["lead"], queue[c]["vertical"])[0],
                 "Phone": (queue[c]["lead"].phones_found or [""])[0],
+                "LinkedIn": getattr(queue[c]["lead"], "linkedin_url", None) or linkedin_people_url(queue[c]["lead"]),
                 "Email": "",
                 "Website": queue[c].get("website_input") or (queue[c]["lead"].website_url or ""),
                 "Why": ("📞 In call list" if c in calls_now else "No website" if not queue[c]["lead"].website_url
@@ -3778,15 +3976,17 @@ if queue:
             edited = _data_editor(
                 ndf, hide_index=True, num_rows="fixed", key=f"q_noemail_{ver}",
                 height=min(38 + 35 * len(ndf), 390),
-                column_order=["Select", "Handled", "Firm", "Contact", "Phone", "Email", "Website", "Why"],
-                disabled=["Firm", "Contact", "Phone", "Why"],
+                column_order=["Select", "Handled", "Firm", "LinkedIn", "Contact", "Email", "Phone", "Website", "Why"],
+                disabled=["Firm", "Phone", "LinkedIn", "Why"],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", width="small"),
                     "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once called or dealt with."),
                     "Firm": st.column_config.TextColumn("Firm", width="medium"),
-                    "Contact": st.column_config.TextColumn("Contact", width="small"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="small", display_text="Find ↗",
+                                                            help="Opens a LinkedIn search for this firm's director in a new tab"),
+                    "Contact": st.column_config.TextColumn("Contact ✎", width="small", help="Type the name you found. Saved permanently."),
                     "Phone": st.column_config.TextColumn("Phone", width="small"),
-                    "Email": st.column_config.TextColumn("Add email", width="medium", help="Type an address to move this firm to Ready to email"),
+                    "Email": st.column_config.TextColumn("Add email ✎", width="medium", help="Type an address to move this firm to Ready to email"),
                     "Website": st.column_config.TextColumn("Website (editable)", width="medium", help="Paste the right website, then Retry"),
                     "Why": st.column_config.TextColumn("Why", width="small"),
                 },
