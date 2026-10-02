@@ -1785,6 +1785,406 @@ SECTOR_COPY: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# ---- Extra sectors (added Oct 2026) ----
+NEW_PRESETS = {
+    "Recruitment Agencies": {
+        "sic_codes": ["78100", "78200", "78300"],
+        "description": "Employment placement & temporary staffing agencies",
+        "search_hint": "Recruitment",
+        "crms": ["Bullhorn", "Vincere", "Firefish", "Mercury"],
+        "primary_hook": "ATS / CRM Integration (Bullhorn / Vincere / Firefish)",
+        "fallback_greeting": "Recruitment Team",
+        "pitch_bullets": [
+            "Candidate and client records pop up the moment they call",
+            "Click-to-dial from your ATS, with every call logged automatically",
+            "Call recording for compliance, coaching and disputes",
+            "Call stats per consultant, ready for your KPI boards",
+        ],
+        "default_cta": "Let me know which ATS you use and how many consultants you have, and I'll send an indicative quote.",
+    },
+    "Financial Advisers & Mortgage Brokers": {
+        "sic_codes": ["66190"],
+        "description": "Financial advice, mortgage & wealth management activities",
+        "search_hint": "Financial",
+        "crms": ["Intelliflo", "Iress Xplan", "Mortgage Brain", "Salesforce"],
+        "primary_hook": "Back-office Integration (Intelliflo / Xplan) & FCA-ready recording",
+        "fallback_greeting": "Advice Team",
+        "pitch_bullets": [
+            "Secure call recording to support FCA record-keeping",
+            "Client record screen-pop from your back-office system",
+            "Click-to-dial and automatic call logging against the client file",
+            "Calls routed to the right adviser, wherever they're working",
+        ],
+        "default_cta": "Let me know which back-office system you use and how many advisers you have, and I'll send an indicative quote.",
+    },
+    "Insurance Brokers": {
+        "sic_codes": ["66220"],
+        "description": "Activities of insurance agents & brokers",
+        "search_hint": "Insurance",
+        "crms": ["Acturis", "Applied Epic", "OpenGI", "SSP"],
+        "primary_hook": "Broking Platform Integration (Acturis / Applied Epic / OpenGI)",
+        "fallback_greeting": "Broking Team",
+        "pitch_bullets": [
+            "Policyholder record pops up before you answer",
+            "Recorded calls stored for compliance and claims disputes",
+            "Renewal and claims calls queued to the right team",
+            "Missed calls flagged so renewals don't slip away",
+        ],
+        "default_cta": "Let me know which broking platform you use and roughly how many staff take calls, and I'll send a quote.",
+    },
+    "Car Dealers & Garages": {
+        "sic_codes": ["45111", "45112", "45200"],
+        "description": "Motor vehicle sales, servicing & repair",
+        "search_hint": "Motors",
+        "crms": ["Keyloop", "Pinewood", "MAM Autowork", "GarageHive"],
+        "primary_hook": "DMS Integration (Keyloop / Pinewood / MAM)",
+        "fallback_greeting": "Sales & Service Team",
+        "pitch_bullets": [
+            "Customer and vehicle record on screen as the phone rings",
+            "Sales, service and parts calls routed to the right desk",
+            "Missed-call alerts so no sales enquiry goes cold",
+            "Call recording to settle disputes and coach the team",
+        ],
+        "default_cta": "Let me know which DMS you use and how many handsets you run, and I'll send an indicative quote.",
+    },
+    "Veterinary Practices": {
+        "sic_codes": ["75000"],
+        "description": "Veterinary activities",
+        "search_hint": "Vets",
+        "crms": ["RxWorks", "Provet Cloud", "Robovet", "VetIT"],
+        "primary_hook": "Practice System Integration (RxWorks / Provet / Robovet)",
+        "fallback_greeting": "Practice Team",
+        "pitch_bullets": [
+            "Client and pet record pops up the moment they call",
+            "Smart queues for the morning rush and emergency calls",
+            "Out-of-hours routing to your on-call vet or partner service",
+            "Missed calls flagged so every booking is followed up",
+        ],
+        "default_cta": "Let me know which practice system you use and how many handsets you have, and I'll send a no-obligation quote.",
+    },
+    "Opticians": {
+        "sic_codes": ["47782"],
+        "description": "Retail sale by opticians",
+        "search_hint": "Opticians",
+        "crms": ["Optix", "Ocuco Acuitas", "Opticabase", "Optisoft"],
+        "primary_hook": "Practice System Integration (Optix / Acuitas / Opticabase)",
+        "fallback_greeting": "Practice Team",
+        "pitch_bullets": [
+            "Patient record on screen before you answer",
+            "Recall and appointment calls queued, not lost",
+            "Missed calls flagged so bookings are always returned",
+            "One number across branches, routed to whoever's free",
+        ],
+        "default_cta": "Let me know which practice system you use and how many branches you have, and I'll send an indicative quote.",
+    },
+    "Property & Block Management": {
+        "sic_codes": ["68320"],
+        "description": "Management of real estate on a fee or contract basis",
+        "search_hint": "Property Management",
+        "crms": ["Qube", "Fixflo", "PropertyFile", "Arthur Online"],
+        "primary_hook": "Property System Integration (Qube / Fixflo / Arthur)",
+        "fallback_greeting": "Property Management Team",
+        "pitch_bullets": [
+            "Resident, landlord or block record pops up on every call",
+            "Out-of-hours and emergency repair calls routed correctly",
+            "Every call logged against the property for an audit trail",
+            "Peak-time queues so residents aren't left on hold",
+        ],
+        "default_cta": "Let me know which system you manage your portfolio in and how many staff take calls, and I'll send a quote.",
+    },
+    "Hotels & Hospitality": {
+        "sic_codes": ["55100", "56101", "56302"],
+        "description": "Hotels, restaurants, pubs & bars",
+        "search_hint": "Hotel",
+        "crms": ["Guestline", "Mews", "ResDiary", "OpenTable"],
+        "primary_hook": "Booking System Integration (Guestline / Mews / ResDiary)",
+        "fallback_greeting": "Reservations Team",
+        "pitch_bullets": [
+            "Guest booking details on screen as the phone rings",
+            "Reservation calls answered even when the team is busy",
+            "Room-to-reception and kitchen extensions that just work",
+            "Missed booking calls flagged so revenue isn't lost",
+        ],
+        "default_cta": "Let me know which booking system you use and how many handsets you need, and I'll send an indicative quote.",
+    },
+    "Care Homes & Home Care": {
+        "sic_codes": ["87100", "87300", "88100"],
+        "description": "Residential care, nursing homes & domiciliary care",
+        "search_hint": "Care",
+        "crms": ["Person Centred Software", "Birdie", "CareDocs", "Access Care Planning"],
+        "primary_hook": "Care System Integration & Reliable Family Contact",
+        "fallback_greeting": "Care Team",
+        "pitch_bullets": [
+            "Families reach the right person first time, day or night",
+            "Calls routed to carers' mobiles when they're on the floor",
+            "Recorded calls for safeguarding and complaints",
+            "Reliable lines ahead of the January 2027 analogue switch-off",
+        ],
+        "default_cta": "Let me know how many sites and handsets you run, and I'll send a no-obligation quote.",
+    },
+    "Trades & Building Services": {
+        "sic_codes": ["43220", "43210"],
+        "description": "Plumbing, heating & electrical installation",
+        "search_hint": "Heating",
+        "crms": ["simPRO", "Commusoft", "Joblogic", "ServiceM8"],
+        "primary_hook": "Job Management Integration (simPRO / Commusoft / Joblogic)",
+        "fallback_greeting": "Office Team",
+        "pitch_bullets": [
+            "Customer and job history on screen as they call",
+            "Calls follow engineers to their mobiles on site",
+            "Every missed call flagged, because a missed call is a missed job",
+            "Call recording to settle quote and booking disputes",
+        ],
+        "default_cta": "Let me know which job management system you use and how many engineers and office staff you have, and I'll send a quote.",
+    },
+    "Contact Centres & Customer Service": {
+        "sic_codes": ["82200"],
+        "description": "Activities of call centres",
+        "search_hint": "Contact Centre",
+        "crms": ["Salesforce", "Zendesk", "Freshdesk", "HubSpot"],
+        "primary_hook": "Contact Centre Platform (queues, wallboards, CRM integration)",
+        "fallback_greeting": "Operations Team",
+        "pitch_bullets": [
+            "Live wallboards and real-time queue stats",
+            "Skills-based routing to the right agent first time",
+            "Call recording and quality scoring with Call Scope",
+            "Screen-pop and logging into Salesforce, Zendesk or HubSpot",
+        ],
+        "default_cta": "Let me know how many agents you run and which CRM you use, and I'll send an indicative quote.",
+    },
+}
+
+NEW_COPY = {
+    "Recruitment Agencies": {
+        "sector_plural": "recruitment agencies",
+        "subject": "Every candidate call logged in your ATS, {company}",
+        "pain": "Consultants live on the phone, but calls rarely make it into {crms}, and a missed call from a candidate or client often goes to a competitor.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which ATS you use and how many consultants you have, and I'll send an indicative quote.",
+        "challenges": [
+            ("Calls missing from the ATS", "Consultants forget to log calls, so the record is never complete."),
+            ("Missed candidate calls", "Candidates who can't get through accept the next agency's offer."),
+            ("No view of activity", "Managers can't see call volumes per consultant without chasing spreadsheets."),
+        ],
+        "outcomes": [
+            ("Screen-pop from your ATS", "The candidate or client record opens the moment the phone rings."),
+            ("Automatic call logging", "Every call, duration and recording saved against the right record."),
+            ("Consultant call stats", "Live call activity per consultant for KPIs and coaching."),
+            ("Missed-call recovery", "Missed calls flagged instantly so no placement slips away."),
+        ],
+    },
+    "Financial Advisers & Mortgage Brokers": {
+        "sector_plural": "financial advisers and mortgage brokers",
+        "subject": "FCA-ready call recording for {company}",
+        "pain": "Advisers move between the office, home and client meetings, calls need to be recorded for compliance, and client notes still end up typed into {crms} by hand.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which back-office system you use and how many advisers you have, and I'll send an indicative quote.",
+        "challenges": [
+            ("Recording obligations", "Calls need to be recorded and easy to find when compliance asks."),
+            ("Advisers on the move", "Clients struggle to reach the right adviser away from the office."),
+            ("Manual file notes", "Call details are retyped into the back-office system after the fact."),
+        ],
+        "outcomes": [
+            ("Secure call recording", "Every call recorded, stored securely and easy to retrieve."),
+            ("Client screen-pop", "The client file opens from your back-office system as the phone rings."),
+            ("Calls on any device", "Advisers take calls on the business number from desk, laptop or mobile."),
+            ("Automatic call logging", "Calls saved against the client record, ready for reviews."),
+        ],
+    },
+    "Insurance Brokers": {
+        "sector_plural": "insurance brokers",
+        "subject": "Faster renewals and claims calls at {company}",
+        "pain": "Renewal season brings call peaks, claims callers are often stressed, and staff still search {crms} while the client waits.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which broking platform you use and how many staff take calls, and I'll send a quote.",
+        "challenges": [
+            ("Renewal peaks", "Clients who can't get through at renewal time shop around."),
+            ("Searching while clients wait", "Staff look up policies manually on every call."),
+            ("Evidence for disputes", "Without recordings, it's your word against theirs."),
+        ],
+        "outcomes": [
+            ("Policyholder screen-pop", "The client and policy record opens as the phone rings."),
+            ("Renewal & claims routing", "Calls go straight to the right team, with queues for busy times."),
+            ("Compliant call recording", "Recordings stored securely and linked to the client."),
+            ("Missed-call follow-up", "Every missed call is flagged so renewals aren't lost."),
+        ],
+    },
+    "Car Dealers & Garages": {
+        "sector_plural": "car dealers and garages",
+        "subject": "No more missed sales calls at {company}",
+        "pain": "Sales, service and parts calls all land on the same lines, enquiries get missed when the team is with customers, and nobody can see the caller's history in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which DMS you use and how many handsets you run, and I'll send an indicative quote.",
+        "challenges": [
+            ("Missed sales enquiries", "A buyer who can't get through rings the next dealer on the list."),
+            ("Calls to the wrong desk", "Service and parts calls bounce around before reaching the right person."),
+            ("No caller history", "Staff can't see the customer's vehicle or last visit when they answer."),
+        ],
+        "outcomes": [
+            ("Customer & vehicle screen-pop", "Their record from your DMS appears as the phone rings."),
+            ("Department routing", "Sales, service and parts calls reach the right team first time."),
+            ("Missed-call alerts", "Every missed enquiry is flagged for a quick call back."),
+            ("Call recording", "Settle disputes and coach the team with recorded calls."),
+        ],
+    },
+    "Veterinary Practices": {
+        "sector_plural": "veterinary practices",
+        "subject": "Fewer missed client calls at {company}",
+        "pain": "Mornings are a scramble, urgent calls need to reach a vet fast, and reception searches {crms} on every call.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which practice system you use and how many handsets you have, and I'll send a no-obligation quote.",
+        "challenges": [
+            ("Morning call peaks", "Clients wait on hold or give up while reception is busy."),
+            ("Urgent calls", "Emergencies need to reach the right person immediately."),
+            ("Searching while the client waits", "Staff look up client and pet records on every call."),
+        ],
+        "outcomes": [
+            ("Client & pet screen-pop", "The record appears on screen as the phone rings."),
+            ("Smart queues & priority routing", "Urgent calls jump the queue and reach a vet quickly."),
+            ("Out-of-hours routing", "Calls go to your on-call vet or partner service automatically."),
+            ("Missed-call follow-up", "Every missed call is flagged so bookings are returned."),
+        ],
+    },
+    "Opticians": {
+        "sector_plural": "opticians",
+        "subject": "Every recall call answered at {company}",
+        "pain": "Recall and appointment calls come in while staff are with patients, missed calls rarely leave a message, and records sit in {crms} rather than on screen.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which practice system you use and how many branches you have, and I'll send an indicative quote.",
+        "challenges": [
+            ("Calls while staff are with patients", "The phone rings out during testing and dispensing."),
+            ("Lost recall bookings", "Patients who can't get through put their eye test off."),
+            ("Multi-branch juggling", "Calls don't reach the branch or colleague who's free."),
+        ],
+        "outcomes": [
+            ("Patient screen-pop", "The patient record appears as the phone rings."),
+            ("Call queueing", "Callers hold briefly instead of ringing out."),
+            ("Missed-call follow-up", "Every missed call is flagged so bookings are returned."),
+            ("One number, every branch", "Calls routed to whichever branch or colleague is free."),
+        ],
+    },
+    "Property & Block Management": {
+        "sector_plural": "property and block managers",
+        "subject": "Every resident call logged at {company}",
+        "pain": "Residents call about repairs at all hours, landlords expect quick answers, and call details rarely reach {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which system you manage your portfolio in and how many staff take calls, and I'll send a quote.",
+        "challenges": [
+            ("Out-of-hours emergencies", "Urgent repair calls need to reach someone, whatever the time."),
+            ("No audit trail", "Disputes are hard to settle without a record of who said what."),
+            ("Answering blind", "Staff search for the block or resident while the caller waits."),
+        ],
+        "outcomes": [
+            ("Resident & property screen-pop", "The block, unit or landlord record appears as the phone rings."),
+            ("Emergency routing", "Out-of-hours calls go straight to the on-call team."),
+            ("Calls logged to the property", "Every call and recording saved for a clear audit trail."),
+            ("Queues for busy periods", "Residents hold briefly instead of ringing out."),
+        ],
+    },
+    "Hotels & Hospitality": {
+        "sector_plural": "hotels and hospitality businesses",
+        "subject": "Never miss a booking call at {company}",
+        "pain": "Reservation calls come in while the team is busy with guests, missed calls are lost bookings, and guest details sit in {crms} rather than on screen.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which booking system you use and how many handsets you need, and I'll send an indicative quote.",
+        "challenges": [
+            ("Missed reservation calls", "Guests who can't get through book somewhere else."),
+            ("Busy front desk", "Reception juggles guests in person and on the phone."),
+            ("Outdated room phones", "Old internal systems are costly and unreliable."),
+        ],
+        "outcomes": [
+            ("Guest screen-pop", "Booking details appear as the phone rings."),
+            ("Overflow & queueing", "Busy calls overflow to another team instead of ringing out."),
+            ("Modern extensions", "Reception, rooms, kitchen and office on one simple system."),
+            ("Missed-call alerts", "Every missed booking call is flagged for a call back."),
+        ],
+    },
+    "Care Homes & Home Care": {
+        "sector_plural": "care providers",
+        "subject": "Families reach the right carer at {company}",
+        "pain": "Families want reassurance, carers are rarely near a desk phone, and many homes still rely on lines affected by the analogue switch-off.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many sites and handsets you run, and I'll send a no-obligation quote.",
+        "challenges": [
+            ("Calls ringing out", "Carers are with residents, so the phone goes unanswered."),
+            ("Night and weekend cover", "Calls need to reach whoever is on shift."),
+            ("Analogue lines", "Alarms and lines need to be ready for the January 2027 switch-off."),
+        ],
+        "outcomes": [
+            ("Calls on carers' mobiles", "The care line rings on mobiles or cordless handsets around the home."),
+            ("Shift-based routing", "Calls follow your rota, day and night."),
+            ("Call recording", "Recordings support safeguarding and complaint handling."),
+            ("Future-proof lines", "Digital phones ready for the analogue switch-off."),
+        ],
+    },
+    "Trades & Building Services": {
+        "sector_plural": "trade and building services firms",
+        "subject": "A missed call is a missed job, {company}",
+        "pain": "Engineers are on site, the office is stretched, and customers who can't get through call the next firm on Google. Job details stay locked in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which job management system you use and how many engineers and office staff you have, and I'll send a quote.",
+        "challenges": [
+            ("Missed new-job calls", "Customers ring the next firm if nobody answers."),
+            ("Engineers away from the office", "Calls can't reach the right person on site."),
+            ("No job history to hand", "The office searches for the customer while they wait."),
+        ],
+        "outcomes": [
+            ("Customer & job screen-pop", "Their history from your job system appears as the phone rings."),
+            ("Calls on engineers' mobiles", "The business number follows the team on site."),
+            ("Missed-call alerts", "Every missed call is flagged so no job is lost."),
+            ("Call recording", "Settle quote and booking disputes with recorded calls."),
+        ],
+    },
+    "Contact Centres & Customer Service": {
+        "sector_plural": "contact centres",
+        "subject": "Live queue insight for {company}",
+        "pain": "Queues build without warning, supervisors can't see who's free, and agents switch between the phone and {crms} on every call.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many agents you run and which CRM you use, and I'll send an indicative quote.",
+        "challenges": [
+            ("Queues you can't see", "Supervisors only find out about waits when customers complain."),
+            ("Calls to the wrong agent", "Callers are transferred around before they reach the right skill."),
+            ("Quality checks by hand", "Listening back and scoring calls takes hours."),
+        ],
+        "outcomes": [
+            ("Live wallboards", "Calls waiting, wait times and agent status in real time."),
+            ("Skills-based routing", "Callers reach the right agent first time."),
+            ("Call Scope quality scoring", "Recordings, analytics and QC in one place."),
+            ("CRM screen-pop", "Customer records open automatically, with every call logged."),
+        ],
+    },
+}
+
+NEW_PLACE_RULES = {
+    "Recruitment Agencies": {"types": {"employment_agency"},
+                             "words": ("recruitment", "recruit", "staffing", "personnel", "resourcing", "talent", "careers")},
+    "Financial Advisers & Mortgage Brokers": {"types": {"finance"},
+                                              "words": ("financial", "wealth", "mortgage", "mortgages", "advisers", "advisors", "ifa", "planning", "finance")},
+    "Insurance Brokers": {"types": {"insurance_agency"}, "words": ("insurance", "brokers", "broker", "insure")},
+    "Car Dealers & Garages": {"types": {"car_dealer", "car_repair"},
+                              "words": ("motors", "motor", "garage", "autos", "auto", "cars", "car", "vehicle", "vehicles", "tyres", "mot")},
+    "Veterinary Practices": {"types": {"veterinary_care"}, "words": ("vet", "vets", "veterinary", "animal", "pet")},
+    "Opticians": {"types": {"optician"}, "words": ("optician", "opticians", "eyecare", "optometrist", "optometrists", "eyewear", "vision", "eye")},
+    "Property & Block Management": {"types": {"real_estate_agency"},
+                                    "words": ("property", "properties", "management", "block", "estates", "residential", "lettings")},
+    "Hotels & Hospitality": {"types": {"lodging", "hotel", "restaurant", "bar", "pub"},
+                             "words": ("hotel", "inn", "restaurant", "bar", "kitchen", "lodge", "arms", "tavern", "bistro")},
+    "Care Homes & Home Care": {"types": {"nursing_home"},
+                               "words": ("care", "nursing", "healthcare", "residential", "homecare", "living", "carers")},
+    "Trades & Building Services": {"types": {"plumber", "electrician", "general_contractor"},
+                                   "words": ("plumbing", "heating", "electrical", "electrics", "gas", "building", "services", "installations", "boilers")},
+    "Contact Centres & Customer Service": {"types": set(),
+                                           "words": ("contact", "centre", "call", "customer", "service", "communications", "telemarketing", "support")},
+}
+
+# Lead Revival: words that point a CRM lead at each sector pitch
+NEW_KEYWORDS = {
+    "Recruitment Agencies": ("recruit", "staffing", "personnel", "resourcing", "employment agency"),
+    "Financial Advisers & Mortgage Brokers": ("financial advi", "wealth", "mortgage", "ifa ", "financial planning"),
+    "Insurance Brokers": ("insurance",),
+    "Car Dealers & Garages": ("motors", "garage", "car sales", "autos", "vehicle", "tyres", "automotive"),
+    "Veterinary Practices": ("veterinar", " vets", "vet group", "animal hospital"),
+    "Opticians": ("optician", "optometr", "eyecare", "eye care"),
+    "Property & Block Management": ("block management", "property management", "residential management"),
+    "Hotels & Hospitality": ("hotel", "restaurant", "hospitality", " inn", "tavern"),
+    "Care Homes & Home Care": ("care home", "nursing home", "home care", "homecare", "domiciliary", "care services"),
+    "Trades & Building Services": ("plumbing", "heating", "electrical", "electrician", "gas services", "boiler"),
+    "Contact Centres & Customer Service": ("contact centre", "call centre", "telemarketing", "customer service"),
+}
+
+VERTICAL_PRESETS.update(NEW_PRESETS)
+SECTOR_PLACE_RULES.update(NEW_PLACE_RULES)
+SECTOR_COPY.update(NEW_COPY)
+
 EVERYTHING_WE_DO = [
     "Cloud phone systems & softphones",
     "Desk, DECT & headset hardware",
@@ -4063,8 +4463,9 @@ with col_left:
 
         selected_vertical_name = st.selectbox(
             "Industry vertical",
-            options=list(VERTICAL_PRESETS.keys()),
-            index=0,
+            options=sorted(VERTICAL_PRESETS.keys()),
+            index=sorted(VERTICAL_PRESETS.keys()).index("Estate & Lettings Agents"),
+            help="16 sectors, each with its own Companies House codes, systems, pitch and overview PDF.",
         )
         vertical_config = VERTICAL_PRESETS[selected_vertical_name]
         render_html(
