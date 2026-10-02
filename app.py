@@ -2713,6 +2713,522 @@ def build_drafts_zip(items: List[Dict[str, Any]], attach_overview: bool) -> Tupl
 # 4. STREAMLIT APPLICATION
 # ==========================================
 
+# ==========================================
+# ZOHO CRM: every enriched firm becomes a Zoho Lead (duplicate-checked), then Send via Zoho
+# ==========================================
+ZOHO_SEND_LIMIT = 100  # Zoho's Send Mail API allows 100 emails a day
+ZOHO_SCOPE = ("ZohoCRM.modules.leads.ALL,ZohoCRM.modules.accounts.READ,ZohoCRM.modules.contacts.READ,"
+              "ZohoCRM.modules.notes.CREATE,ZohoCRM.coql.READ,ZohoCRM.settings.fields.READ,ZohoCRM.org.READ,"
+              "ZohoCRM.send_mail.leads.CREATE,ZohoCRM.Files.CREATE,ZohoCRM.settings.emails.READ")
+
+class ZohoError(RuntimeError):
+    pass
+
+
+class ZohoCRM:
+    """Minimal Zoho CRM v8 client using a Self Client refresh token (EU data centre by default)."""
+
+    def __init__(self) -> None:
+        self.client_id = _secret_value("ZOHO_CLIENT_ID")
+        self.client_secret = _secret_value("ZOHO_CLIENT_SECRET")
+        self.refresh_token = _secret_value("ZOHO_REFRESH_TOKEN")
+        self.accounts_url = _secret_value("ZOHO_ACCOUNTS_URL", "https://accounts.zoho.eu").rstrip("/")
+        self.api_domain = _secret_value("ZOHO_API_DOMAIN", "https://www.zohoapis.eu").rstrip("/")
+        self.crm_url = _secret_value("ZOHO_CRM_URL", "https://crm.zoho.eu").rstrip("/")
+        self.configured = bool(self.client_id and self.client_secret and self.refresh_token)
+        # Client ID + secret in Secrets but no refresh token yet: the app can do the one-off swap itself
+        self.can_setup = bool(self.client_id and self.client_secret) and not self.refresh_token
+
+    # ---------- one-off setup: swap a Self Client code for a refresh token ----------
+    def exchange_code(self, code: str) -> Dict[str, str]:
+        """Returns {'refresh_token': ...} or {'error': plain-English reason}."""
+        try:
+            resp = requests.post(
+                f"{self.accounts_url}/oauth/v2/token",
+                data={"grant_type": "authorization_code", "client_id": self.client_id,
+                      "client_secret": self.client_secret, "code": code.strip()},
+                timeout=15,
+            )
+            data = resp.json()
+        except requests.exceptions.RequestException as exc:
+            return {"error": f"Couldn't reach Zoho ({exc.__class__.__name__}). Try again in a moment."}
+        except ValueError:
+            return {"error": f"Zoho sent an unreadable reply (HTTP {resp.status_code}). Check the Self Client is on api-console.zoho.eu."}
+        if data.get("refresh_token"):
+            return {"refresh_token": data["refresh_token"]}
+        if data.get("access_token"):
+            return {"error": "Zoho gave a short-lived token but no refresh token. Generate a new code and try again."}
+        err = str(data.get("error") or f"HTTP {resp.status_code}")
+        hints = {
+            "invalid_code": "The code has expired or was already used. Codes last only a few minutes and work once, so generate a fresh one and paste it straight in.",
+            "invalid_client": "Zoho doesn't recognise ZOHO_CLIENT_ID. Copy it again from the Self Client's Client Secret tab. If the Self Client was made on api-console.zoho.com (not .eu), make a new one on api-console.zoho.eu.",
+            "invalid_client_secret": "ZOHO_CLIENT_SECRET doesn't match the client ID. Copy it again from the Self Client's Client Secret tab (watch for stray spaces).",
+        }
+        return {"error": f"Zoho said: {err}. " + hints.get(err, "Generate a fresh code and try again. If it keeps failing, check the client ID and secret in Secrets.")}
+
+    # ---------- auth ----------
+    def _token(self, force: bool = False) -> str:
+        cached = st.session_state.get("zoho_token")
+        if cached and not force and cached[1] > time.time() + 60:
+            return cached[0]
+        try:
+            resp = requests.post(
+                f"{self.accounts_url}/oauth/v2/token",
+                params={"refresh_token": self.refresh_token, "client_id": self.client_id,
+                        "client_secret": self.client_secret, "grant_type": "refresh_token"},
+                timeout=12,
+            )
+            data = resp.json()
+        except requests.exceptions.RequestException as exc:
+            raise ZohoError(f"Couldn't reach Zoho to sign in ({exc.__class__.__name__}).")
+        except ValueError:
+            raise ZohoError("Zoho sent an unreadable sign-in response.")
+        if "access_token" not in data:
+            err = data.get("error", "unknown error")
+            hint = {
+                "invalid_code": "The refresh token is invalid or was revoked. Generate a new one in api-console.zoho.eu.",
+                "invalid_client": "ZOHO_CLIENT_ID / ZOHO_CLIENT_SECRET don't match. Check them in Secrets.",
+            }.get(err, "Check the Zoho secrets and that the Self Client is in the EU data centre.")
+            raise ZohoError(f"Zoho sign-in failed ({err}). {hint}")
+        if data.get("api_domain"):
+            self.api_domain = data["api_domain"].rstrip("/")
+        st.session_state["zoho_token"] = (data["access_token"], time.time() + int(data.get("expires_in", 3600)))
+        return data["access_token"]
+
+    def _request(self, method: str, path: str, **kwargs) -> Optional[Dict[str, Any]]:
+        for attempt in (0, 1):
+            headers = {"Authorization": f"Zoho-oauthtoken {self._token(force=attempt == 1)}"}
+            try:
+                resp = requests.request(method, f"{self.api_domain}{path}", headers=headers, timeout=20, **kwargs)
+            except requests.exceptions.RequestException as exc:
+                raise ZohoError(f"Couldn't reach Zoho CRM ({exc.__class__.__name__}).")
+            if resp.status_code == 204:
+                return None  # No records
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            code = str(body.get("code", ""))
+            if resp.status_code == 401 and code in ("INVALID_TOKEN", "AUTHENTICATION_FAILURE") and attempt == 0:
+                continue  # Token expired early: refresh once and retry
+            if resp.status_code >= 400:
+                row = (body.get("data") or [{}])[0] if isinstance(body.get("data"), list) else {}
+                code = code or str(row.get("code", ""))
+                msg = body.get("message") or row.get("message") or code or f"HTTP {resp.status_code}"
+                if code == "OAUTH_SCOPE_MISMATCH":
+                    msg = "The Zoho token is missing a permission. Regenerate it with the scopes listed in the setup notes."
+                raise ZohoError(f"Zoho CRM error: {msg}")
+            return body
+        raise ZohoError("Zoho CRM rejected the sign-in.")
+
+    # ---------- reads ----------
+    def fields(self, module: str) -> Dict[str, Dict[str, Any]]:
+        body = self._request("GET", "/crm/v8/settings/fields", params={"module": module}) or {}
+        return {f["api_name"]: f for f in body.get("fields", [])}
+
+    @staticmethod
+    def picklist(fields: Dict[str, Dict[str, Any]], api_name: str) -> List[str]:
+        values = (fields.get(api_name) or {}).get("pick_list_values") or []
+        out = []
+        for v in values:
+            for k in ("display_value", "actual_value"):
+                if v.get(k) and v[k] != "-None-":
+                    out.append(v[k])
+        return out
+
+    def org_domain(self) -> Optional[str]:
+        try:
+            body = self._request("GET", "/crm/v8/org") or {}
+            org = (body.get("org") or [{}])[0]
+            return org.get("domain_name")
+        except ZohoError:
+            return None
+
+    def coql(self, query: str) -> List[Dict[str, Any]]:
+        body = self._request("POST", "/crm/v8/coql", json={"select_query": query})
+        return (body or {}).get("data") or []
+
+    def create_lead(self, fields: Dict[str, Any]) -> str:
+        body = self._request("POST", "/crm/v8/Leads", json={"data": [fields], "trigger": ["workflow"]})
+        return str(self._row_result(body).get("id", ""))
+
+    # ---------- writes (phase 2): send, fill blanks, notes ----------
+    @staticmethod
+    def _row_result(body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        row = ((body or {}).get("data") or [{}])[0]
+        if row.get("status") != "success":
+            msg = row.get("message") or row.get("code") or "unknown error"
+            raise ZohoError(f"Zoho CRM error: {msg}")
+        return row.get("details") or {}
+
+    def from_addresses(self) -> List[Dict[str, Any]]:
+        body = self._request("GET", "/crm/v8/settings/emails/actions/from_addresses") or {}
+        return [a for a in body.get("from_addresses", []) if a.get("email")]
+
+    def upload_file(self, filename: str, data: bytes) -> str:
+        body = self._request("POST", "/crm/v8/files", files={"file": (filename, data, "application/pdf")})
+        return self._row_result(body)["id"]
+
+    def send_mail(self, record_id: str, sender: Dict[str, Any], to_email: str, to_name: str,
+                  subject: str, html: str, attachment_ids: Optional[List[str]] = None) -> str:
+        mail: Dict[str, Any] = {
+            "from": {"user_name": sender.get("user_name") or "", "email": sender["email"]},
+            "to": [{"user_name": to_name or "", "email": to_email}],
+            "subject": subject, "content": html, "mail_format": "html",
+        }
+        if sender.get("type") == "org_email":
+            mail["org_email"] = True
+        if attachment_ids:
+            mail["attachments"] = [{"id": a} for a in attachment_ids]
+        body = self._request("POST", f"/crm/v8/Leads/{record_id}/actions/send_mail", json={"data": [mail]})
+        return self._row_result(body).get("message_id", "")
+
+    def update_lead(self, record_id: str, fields: Dict[str, Any]) -> None:
+        if fields:
+            self._row_result(self._request("PUT", "/crm/v8/Leads", json={"data": [dict(fields, id=record_id)]}))
+
+    def add_note(self, record_id: str, title: str, content: str) -> None:
+        note = {"Note_Title": title, "Note_Content": content,
+                "Parent_Id": {"module": {"api_name": "Leads"}, "id": record_id}}
+        self._row_result(self._request("POST", f"/crm/v8/Leads/{record_id}/Notes", json={"data": [note]}))
+
+    def record_url(self, record_id: str, module: str = "Leads") -> str:
+        dom = st.session_state.get("zoho_org_domain")
+        base = f"{self.crm_url}/crm/{dom}" if dom else f"{self.crm_url}/crm"
+        return f"{base}/tab/{module}/{record_id}"
+
+ZOHO = ZohoCRM()
+ZOHO_STORE = SentLog("GITHUB_ZOHO_LEADS_PATH", "zoho_leads.json", ".zoho_leads.json")
+UK_POSTCODE_RE = re.compile(r"^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$", re.I)
+
+
+def zoho_lead_source() -> str:
+    return _secret_value("ZOHO_LEAD_SOURCE", "Prospect Engine")
+
+
+def get_zoho_store() -> Dict[str, Any]:
+    if "zoho_store_data" not in st.session_state:
+        st.session_state["zoho_store_data"] = ZOHO_STORE.load()
+    return st.session_state["zoho_store_data"]
+
+
+def save_zoho_store(changes: Dict[str, Dict[str, Any]]) -> None:
+    try:
+        st.session_state["zoho_store_data"] = ZOHO_STORE.apply(changes, f"Prospect Engine: {len(changes)} firms to Zoho")
+    except Exception:
+        st.session_state.setdefault("zoho_store_data", {}).update(changes)
+
+
+def load_zoho_meta() -> Optional[str]:
+    """Lead fields (for picklist checks) and the org's URL name, once per session."""
+    if "pe_lead_fields" in st.session_state:
+        return None
+    try:
+        st.session_state["pe_lead_fields"] = ZOHO.fields("Leads")
+    except ZohoError as exc:
+        return str(exc)
+    st.session_state["zoho_org_domain"] = ZOHO.org_domain()
+    return None
+
+
+def zoho_on() -> bool:
+    return ZOHO.configured and "pe_lead_fields" in st.session_state
+
+
+def lead_source_ok() -> bool:
+    return zoho_lead_source() in ZOHO.picklist(st.session_state.get("pe_lead_fields") or {}, "Lead_Source")
+
+
+def _q(v: str) -> str:
+    return "'" + (v or "").replace("\\", "").replace("'", "\\'") + "'"
+
+
+def _either(conds: List[str]) -> str:
+    """COQL wants OR conditions nested in pairs: ((a or b) or c)."""
+    out = conds[0]
+    for c in conds[1:]:
+        out = f"({out} or {c})"
+    return out
+
+
+def _name_variants(lead: ScrapedLead) -> List[str]:
+    names = [lead.company_name, friendly_company_name(lead.company_name), getattr(lead, "trading_name", None) or ""]
+    base = friendly_company_name(lead.company_name)
+    names += [f"{base} Ltd", f"{base} Limited", base.upper(), lead.company_name.title()]
+    return list(dict.fromkeys(n.strip() for n in names if n and n.strip()))[:8]
+
+
+def find_in_zoho(lead: ScrapedLead, email: str, phone: str) -> Optional[Dict[str, Any]]:
+    """An existing Lead, or an existing customer (Account / Contact email), for this firm."""
+    names = ", ".join(_q(n) for n in _name_variants(lead))
+    conds = [f"Company in ({names})"]
+    if email:
+        conds.append(f"Email = {_q(email)}")
+    if phone:
+        variants = list(dict.fromkeys([phone, phone.replace(" ", "")]))
+        conds.append(f"Phone in ({', '.join(_q(p) for p in variants)})")
+    rows = ZOHO.coql(f"select Company, Lead_Status from Leads where {_either(conds)} limit 0, 5")
+    if rows:
+        return {"status": "existing", "id": str(rows[0].get("id")), "zoho_status": rows[0].get("Lead_Status") or ""}
+    rows = ZOHO.coql(f"select Account_Name from Accounts where Account_Name in ({names}) limit 0, 5")
+    if rows:
+        return {"status": "customer", "id": str(rows[0].get("id")), "name": rows[0].get("Account_Name") or ""}
+    if email:
+        rows = ZOHO.coql(f"select Email, Account_Name from Contacts where Email = {_q(email)} limit 0, 5")
+        acc = (rows[0].get("Account_Name") or {}) if rows else {}
+        if rows and isinstance(acc, dict) and acc.get("id"):
+            return {"status": "customer", "id": str(acc["id"]), "name": acc.get("name") or ""}
+    return None
+
+
+def _split_address(addr: str) -> Dict[str, str]:
+    parts = [p.strip() for p in (addr or "").split(",") if p.strip()]
+    out: Dict[str, str] = {}
+    if parts and UK_POSTCODE_RE.match(parts[-1]):
+        out["Zip_Code"] = parts.pop().upper()
+    county = re.compile(r"(shire|^(west|east|north|south|greater) |midlands|merseyside|cornwall|devon|kent|essex|"
+                        r"surrey|norfolk|suffolk|cumbria|durham|tyne and wear|london|wales|scotland|county)", re.I)
+    if len(parts) >= 3 and county.search(parts[-1]):
+        out["State"] = parts.pop()
+    if len(parts) >= 2:
+        out["City"] = parts.pop()
+    if parts:
+        if len(parts) > 1 and re.fullmatch(r"[\dA-Za-z\-/]{1,6}", parts[0]) and any(ch.isdigit() for ch in parts[0]):
+            parts = [f"{parts[0]} {parts[1]}"] + parts[2:]  # "14, Bridge Street" -> "14 Bridge Street"
+        out["Street"] = ", ".join(parts)
+    return out
+
+
+def zoho_lead_fields(item: Dict[str, Any], cn: str) -> Dict[str, Any]:
+    lead: ScrapedLead = item["lead"]
+    lf = st.session_state.get("pe_lead_fields") or {}
+    contact, role = infer_contact_name_and_role(lead, item["vertical"])
+    person = (getattr(lead, "contact_name", None) or "").strip()
+    if not person:
+        officer = pick_decision_maker(lead.officers)
+        person = display_officer_name(officer.name) if officer else ""
+        role = officer.role if officer else ""
+    fields: Dict[str, Any] = {"Company": lead_display_name(lead)}
+    if person and len(person.split()) >= 2:
+        fields["First_Name"], fields["Last_Name"] = person.split()[0], person.split()[-1]
+        if role:
+            fields["Designation"] = role
+    else:
+        fields["Last_Name"] = lead_display_name(lead)  # Zoho needs a Last Name
+    email = (item.get("to") or (lead.emails_found[0] if lead.emails_found else "")).strip()
+    if email:
+        fields["Email"] = email
+    if lead.phones_found:
+        fields["Phone"] = lead.phones_found[0]
+    if lead.website_url and lead.website_confidence in VERIFIED_WEBSITE:
+        fields["Website"] = lead.website_url
+    fields.update(_split_address(lead.registered_address or ""))
+    industries = ZOHO.picklist(lf, "Industry")
+    match = next((v for v in industries if v.lower() == item["vertical"].lower()), None)
+    if match:
+        fields["Industry"] = match
+    if lead_source_ok():
+        fields["Lead_Source"] = zoho_lead_source()
+    statuses = ZOHO.picklist(lf, "Lead_Status")
+    emailed = cn in get_sent_log()
+    want = "Attempted to Contact" if emailed else "Not Contacted"
+    if want in statuses:
+        fields["Lead_Status"] = want
+    directors = [display_officer_name(o.name) for o in lead.officers if o.raw_role in DECISION_MAKER_ROLES][:4]
+    desc = [
+        f"Found by Prospect Engine on {now_uk().strftime('%d %b %Y')} (source: {zoho_lead_source()}).",
+        f"Legal name: {lead.company_name}" + (f" · Company number: {lead.company_number}" if lead.company_number else ""),
+        f"Sector pitched: {item['vertical']}" + (f" · SIC: {', '.join(lead.sic_codes[:3])}" if lead.sic_codes else ""),
+    ]
+    if directors:
+        desc.append("Directors: " + ", ".join(directors))
+    if lead.website_url:
+        desc.append(f"Website: {lead.website_url} ({lead.website_confidence or 'unverified'} match)")
+    others = [e for e in lead.emails_found if e != email][:4]
+    if others:
+        desc.append("Other emails found: " + ", ".join(others))
+    if len(lead.phones_found) > 1:
+        desc.append("Other numbers: " + ", ".join(lead.phones_found[1:4]))
+    if getattr(lead, "linkedin_url", None):
+        desc.append(f"LinkedIn: {lead.linkedin_url}")
+    desc.append("Details from Companies House, the firm's own website and Google Maps.")
+    fields["Description"] = "\n".join(desc)
+    return fields
+
+
+def push_to_zoho_leads(cns: List[str]) -> Dict[str, List[str]]:
+    """Adds each firm to Zoho as a Lead unless it's already there (as a lead or a customer)."""
+    queue = st.session_state.get("queue", {})
+    store = get_zoho_store()
+    todo = [cn for cn in cns if cn in queue and cn not in store]
+    summary: Dict[str, List[str]] = {"created": [], "existing": [], "customer": [], "error": []}
+    if not todo:
+        return summary
+    stamp = now_uk().isoformat(timespec="seconds")
+    who = get_sender().get("name", "")
+
+    def _one(cn: str) -> Tuple[str, Dict[str, Any]]:
+        item = queue[cn]
+        lead: ScrapedLead = item["lead"]
+        email = (item.get("to") or (lead.emails_found[0] if lead.emails_found else "")).strip()
+        phone = lead.phones_found[0] if lead.phones_found else ""
+        try:
+            hit = find_in_zoho(lead, email, phone)
+            if hit:
+                return cn, dict(hit, at=stamp, by=who, firm=lead_display_name(lead))
+            lid = ZOHO.create_lead(zoho_lead_fields(item, cn))
+            rec = get_sent_log().get(cn)
+            if rec:  # Already emailed from here (Outlook draft): put that on the lead's history
+                ZOHO.add_note(lid, "Prospect Engine: pitch emailed",
+                              f"Pitch emailed on {fmt_when(rec.get('sent_at', ''))} by {rec.get('sent_by') or 'the team'}"
+                              f" to {rec.get('to') or 'unknown'}.\nSubject: {rec.get('subject', '')}")
+            return cn, {"status": "created", "id": lid, "at": stamp, "by": who, "firm": lead_display_name(lead)}
+        except ZohoError as exc:
+            return cn, {"status": "error", "error": str(exc), "firm": lead_display_name(lead)}
+
+    changes: Dict[str, Dict[str, Any]] = {}
+    progress = st.progress(0.0, text="Checking Zoho for duplicates…")
+    for n, cn_ in enumerate(todo, start=1):
+        progress.progress(n / len(todo), text=f"Adding to Zoho {n} of {len(todo)} · {lead_display_name(queue[cn_]['lead'])}")
+        cn, rec = _one(cn_)
+        summary[rec["status"]].append(rec.get("firm", cn) if rec["status"] != "error" else f"{rec['firm']}: {rec['error']}")
+        if rec["status"] != "error":
+            changes[cn] = rec
+    progress.empty()
+    if changes:
+        save_zoho_store(changes)
+    bump_queue_editor()
+    return summary
+
+
+def zoho_summary_text(s: Dict[str, List[str]]) -> Optional[str]:
+    bits = []
+    if s["created"]:
+        bits.append(f"{len(s['created'])} added as new leads")
+    if s["existing"]:
+        bits.append(f"{len(s['existing'])} already in Zoho, so not duplicated")
+    if s["customer"]:
+        bits.append(f"{len(s['customer'])} already a customer: " + ", ".join(s["customer"][:3]))
+    return ("Zoho: " + " · ".join(bits) + ".") if bits else None
+
+
+def zoho_label(cn: str) -> str:
+    rec = get_zoho_store().get(cn)
+    if not rec:
+        return ""
+    return {"created": "✓ New lead", "existing": "• Already a lead", "customer": "⚠ Customer"}.get(rec.get("status"), "")
+
+
+def zoho_sent_today(log: Dict[str, Any]) -> int:
+    today = now_uk().date().isoformat()
+    return sum(1 for r in log.values() if r.get("via") == "zoho" and str(r.get("sent_at", "")).startswith(today))
+
+
+def zoho_senders() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    if "zoho_from" not in st.session_state:
+        try:
+            st.session_state["zoho_from"] = ZOHO.from_addresses()
+        except ZohoError as exc:
+            return [], str(exc)
+    return st.session_state["zoho_from"], None
+
+
+def send_via_zoho(cns: List[str], sender: Optional[Dict[str, Any]], origin: str = "panel") -> None:
+    """Makes sure each firm is a Zoho lead, then sends its pitch from Zoho, moves the status on and adds a note."""
+    queue = st.session_state.get("queue", {})
+    push_to_zoho_leads(cns)
+    store = get_zoho_store()
+    done, problems = [], []
+    sent_changes: Dict[str, Dict[str, Any]] = {}
+    who = get_sender().get("name") or "Prospect Engine"
+    stamp = now_uk().strftime("%d %b %Y %H:%M")
+    statuses = ZOHO.picklist(st.session_state.get("pe_lead_fields") or {}, "Lead_Status")
+    progress = st.progress(0.0, text="Sending through Zoho…")
+    for n, cn in enumerate(cns, start=1):
+        item = queue.get(cn)
+        if not item:
+            continue
+        lead: ScrapedLead = item["lead"]
+        name = lead_display_name(lead)
+        progress.progress(n / len(cns), text=f"Sending {n} of {len(cns)} · {name}")
+        rec = store.get(cn) or {}
+        if rec.get("status") == "customer":
+            problems.append(f"{name}: already a customer in Zoho, so no new-business pitch was sent")
+            continue
+        if not rec.get("id"):
+            problems.append(f"{name}: couldn't add it to Zoho, so it wasn't sent")
+            continue
+        ensure_draft(item)
+        to = (item.get("to") or "").strip()
+        if not to or not clean_email(to) or not sender:
+            problems.append(f"{name}: no valid email address" if sender else f"{name}: no From address in Zoho")
+            continue
+        contact = infer_contact_name_and_role(lead, item["vertical"])[0]
+        try:
+            att = []
+            if st.session_state["opt_attach"]:
+                pdf = create_sector_overview_pdf(lead, item["vertical"])
+                att = [ZOHO.upload_file(f"SY_Communications_overview_{draft_filename_part(lead.company_name)}.pdf", pdf)]
+            ZOHO.send_mail(rec["id"], sender, to, "" if contact in ("Team", "there") else contact,
+                           item["subject"], _email_body_html(item["body"], item["subject"]), att)
+        except ZohoError as exc:
+            problems.append(f"{name}: not sent. {exc}")
+            continue
+        try:
+            if "Attempted to Contact" in statuses:
+                ZOHO.update_lead(rec["id"], {"Lead_Status": "Attempted to Contact"})
+            ZOHO.add_note(rec["id"], "Prospect Engine: pitch emailed",
+                          f"Emailed by {who} via Prospect Engine on {stamp}.\nTo: {to}\nSubject: {item['subject']}\n"
+                          f"Pitch: {item['vertical']}" + (" (overview PDF attached)" if st.session_state["opt_attach"] else ""))
+        except ZohoError as exc:
+            problems.append(f"{name}: sent, but the lead wasn't updated. {exc}")
+        sent_changes[cn] = dict(sent_record(item), via="zoho", status="Emailed via Zoho",
+                                from_address=sender.get("email", ""))
+        done.append(name)
+    progress.empty()
+    if sent_changes:
+        record_sent(sent_changes)
+    st.session_state["zoho_push_result"] = {"done": done, "problems": problems, "origin": origin}
+
+
+def show_zoho_push_result(origin: str) -> None:
+    res = st.session_state.get("zoho_push_result")
+    if not res or res.get("origin") != origin:
+        return
+    st.session_state.pop("zoho_push_result", None)
+    if res["done"]:
+        st.success(f"{len(res['done'])} sent via Zoho: " + ", ".join(res["done"][:6]) + ("…" if len(res["done"]) > 6 else ""))
+    for p_ in res["problems"]:
+        st.warning(p_)
+
+
+def render_zoho_setup() -> None:
+    render_html(
+        '<div class="pe-panel"><div class="h">One-off Zoho setup</div>'
+        '<div style="font-size:.84rem;line-height:1.55;color:var(--muted)">'
+        "<b>1.</b> In <b>api-console.zoho.eu</b>, open your Self Client and go to <b>Generate Code</b>.<br>"
+        "<b>2.</b> Paste the scope below, pick <b>10 minutes</b> and click <b>Create</b>.<br>"
+        "<b>3.</b> Paste the code here and click Connect. Be quick: codes expire.</div></div>"
+    )
+    st.code(ZOHO_SCOPE, language=None)
+    with st.form("zoho_setup", border=False):
+        setup_code = st.text_input("Code from Zoho", type="password", placeholder="1000.xxxxxxxx…")
+        setup_go = st.form_submit_button("Connect Zoho", type="primary", **FULL_WIDTH)
+    if setup_go:
+        if not setup_code.strip():
+            st.warning("Paste the code from Zoho first.")
+        else:
+            with st.spinner("Asking Zoho for a permanent key…"):
+                st.session_state["zoho_setup_result"] = ZOHO.exchange_code(setup_code)
+    result = st.session_state.get("zoho_setup_result") or {}
+    if result.get("error"):
+        st.error(result["error"])
+    elif result.get("refresh_token"):
+        st.success("Connected. Last step:")
+        st.code(f'ZOHO_REFRESH_TOKEN = "{result["refresh_token"]}"', language=None)
+        st.caption("Copy that line into this app's Streamlit Secrets, save, then reboot. Don't share it in emails or chats.")
+
+
 def render_leads_table(df: pd.DataFrame, key: str):
     """Selectable company table with tidy columns. Works on old and new Streamlit versions."""
     column_config = {
@@ -3051,6 +3567,12 @@ def run_enrichment(
         st.session_state["current_cn"] = first_cn
         st.session_state["current_cn_select"] = first_cn
     st.session_state["stat_dossiers"] += len(results)
+    if results and zoho_on() and st.session_state.get("zoho_auto", True):
+        summary = push_to_zoho_leads(list(results))
+        if zoho_summary_text(summary):
+            st.info(zoho_summary_text(summary))
+        for err in summary["error"]:
+            st.warning("Zoho: couldn't add " + err)
     if failures:
         st.warning("Couldn't enrich: " + ", ".join(failures))
     if len(rows) > 1 and results:
@@ -3142,6 +3664,22 @@ with st.sidebar:
     render_html(f'<div class="pe-status">Call list<span class="st {call_state}</span></div>')
     places_state = 'ok">Connected' if _secret_value("GOOGLE_PLACES_API_KEY") else 'idle">Not set up'
     render_html(f'<div class="pe-status">Google Maps lookup<span class="st {places_state}</span></div>')
+    zoho_err = load_zoho_meta() if ZOHO.configured else None
+    zoho_state = ('idle">Setup needed' if ZOHO.can_setup or (zoho_err and "invalid_code" in zoho_err)
+                  else 'off">Error' if zoho_err else 'ok">Connected' if zoho_on() else 'idle">Not set up')
+    render_html(f'<div class="pe-status">Zoho CRM<span class="st {zoho_state}</span></div>')
+    if ZOHO.can_setup or (zoho_err and ("invalid_code" in zoho_err or "permission" in zoho_err.lower())):
+        with st.expander("Connect Zoho", expanded=False):
+            render_zoho_setup()
+    elif zoho_err:
+        st.caption("⚠️ " + zoho_err)
+    elif zoho_on():
+        st.session_state["zoho_auto"] = st.toggle(
+            "Add enriched firms to Zoho", value=st.session_state.get("zoho_auto", True), key="w_zoho_auto",
+            help="Every enriched firm becomes a Zoho Lead (checked for duplicates and existing customers first).")
+        if not lead_source_ok():
+            st.caption(f"⚠️ Add **{zoho_lead_source()}** as a Lead Source option in Zoho (Setup → Modules → Leads →"
+                       " Lead Source). Until then, new leads are created without a Lead Source.")
     if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
         st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
     elif SENT_LOG.backend == "local":
@@ -3150,6 +3688,8 @@ with st.sidebar:
         st.session_state.pop("sent_log_data", None)
         st.session_state.pop("call_list_data", None)
         st.session_state.pop("contacts_data", None)
+        for _k in ("zoho_store_data", "zoho_from", "pe_lead_fields"):
+            st.session_state.pop(_k, None)
         st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
         st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
         bump_queue_editor()
@@ -3709,6 +4249,11 @@ with col_right:
             meta.append(confidence_chip(lead.website_confidence if lead.website_url else None))
             if is_sent:
                 meta.append(chip(f"Sent {sent_label(log_now[cn])[2:]}", "good"))
+            zrec = get_zoho_store().get(cn) or {}
+            if zrec:
+                meta.append(chip({"created": "In Zoho: new lead", "existing": "In Zoho: existing lead",
+                                  "customer": "Existing customer!"}.get(zrec.get("status"), "In Zoho"),
+                                 "risk" if zrec.get("status") == "customer" else "accent"))
             blurb = (
                 f'<div class="blurb">“{esc(lead.site_meta_description[:220])}'
                 f'{"…" if len(lead.site_meta_description) > 220 else ""}”</div>'
@@ -3718,6 +4263,11 @@ with col_right:
                 f'<div class="pe-firm"><div><div class="name">{esc(lead.company_name)}</div>'
                 f'<div class="meta">{"".join(meta)}</div>{blurb}</div></div>'
             )
+            if zrec.get("id"):
+                st.link_button("Open in Zoho ↗", ZOHO.record_url(zrec["id"], "Accounts" if zrec.get("status") == "customer" else "Leads"))
+            if zrec.get("status") == "customer":
+                st.error(f"This firm is already a customer in Zoho ({zrec.get('name') or 'Accounts'}). Use Customer Growth for them,"
+                         " not a new-business pitch.")
 
             if not lead.website_url and getattr(lead, "contact_email", None):
                 pass  # A person has confirmed the contact, so the missing website no longer matters
@@ -3937,6 +4487,27 @@ with col_right:
                         **FULL_WIDTH,
                     )
 
+                # Send this one firm through Zoho (adds it as a lead first if needed)
+                if zoho_on() and not is_sent and zrec.get("status") != "customer":
+                    try:
+                        zpop = st.popover("🚀  Send this email via Zoho", key=f"zs1_{cn}_{st.session_state.get('sent_log_ver', 0)}",
+                                          disabled=not email_to, **FULL_WIDTH)
+                    except TypeError:
+                        zpop = st.popover("🚀  Send this email via Zoho", disabled=not email_to, **FULL_WIDTH)
+                    with zpop:
+                        senders_, s_err_ = zoho_senders()
+                        if s_err_:
+                            st.caption(s_err_)
+                        elif senders_:
+                            idx_ = st.session_state.get("zs_from", 0)
+                            frm_ = senders_[idx_] if 0 <= idx_ < len(senders_) else senders_[0]
+                            st.markdown(f"Send to **{esc(email_to)}** from **{esc(frm_['email'])}**?")
+                            st.caption("Logged on the Zoho lead with a note, and the status moves to Attempted to Contact.")
+                            if st.button("Yes, send it now", type="primary", key=f"zs1_go_{cn}", **FULL_WIDTH):
+                                send_via_zoho([cn], frm_, origin="dossier")
+                                st.rerun()
+                show_zoho_push_result("dossier")
+
                 # Sent tick: saved to the permanent log, so it's there next time anyone opens the app
                 sent_now = st.checkbox(
                     "✅  Handled: tick once this email has gone",
@@ -4035,6 +4606,61 @@ def _apply_editor(edited: pd.DataFrame, log_now: Dict[str, Any]) -> None:
         st.rerun()
 
 
+
+def render_zoho_send_panel(ready_sel: List[str], log_now: Dict[str, Any]) -> None:
+    with st.container(key="card-zoho-send"):
+        render_html(
+            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0 2px 0">'
+            f'<span style="font-weight:700;color:var(--text)">🚀 Send via Zoho</span>{chip("Logged on each lead", "accent")}</div>'
+            '<div style="font-size:.8rem;color:var(--muted);margin-bottom:6px">Sends each pitch from Zoho with its PDF,'
+            " logs it on the firm's Zoho lead, adds a note and sets the status to Attempted to Contact.</div>")
+        show_zoho_push_result("panel")
+        store = get_zoho_store()
+        missing = [c for c in st.session_state.get("queue_order", []) if c in st.session_state.get("queue", {}) and c not in store]
+        if missing and st.button(f"➕  Add {len(missing)} firm(s) not yet in Zoho", key="zoho_add_missing"):
+            s_ = push_to_zoho_leads(missing)
+            st.session_state["zoho_add_msg"] = zoho_summary_text(s_) or "Nothing new to add."
+            st.rerun()
+        if st.session_state.get("zoho_add_msg"):
+            st.info(st.session_state.pop("zoho_add_msg"))
+        senders, err = zoho_senders()
+        if err:
+            if "permission" in err.lower() or "scope" in err.lower():
+                st.info("Sending needs the full Zoho permissions: open Connect Zoho in the sidebar and connect again.")
+            else:
+                st.error(err)
+            return
+        if not senders:
+            st.warning("Zoho didn't return any address to send from.")
+            return
+        st.selectbox("Send from", list(range(len(senders))), key="zs_from",
+                     format_func=lambda i: f"{senders[i].get('user_name') or ''} <{senders[i]['email']}>".strip()
+                     + (" · org address" if senders[i].get("type") == "org_email" else ""))
+        ids = [c for c in ready_sel if (store.get(c) or {}).get("status") != "customer"]
+        customers = len(ready_sel) - len(ids)
+        if customers:
+            st.caption(f"⚠️ {customers} selected firm(s) are already customers in Zoho, so they're left out.")
+        sent_today = zoho_sent_today(log_now)
+        left = max(0, ZOHO_SEND_LIMIT - sent_today)
+        if len(ids) > left:
+            st.warning(f"Zoho allows {ZOHO_SEND_LIMIT} emails a day and {sent_today} have gone today, so only the first {left} will be sent.")
+            ids = ids[:left]
+        label = f"🚀  Send {len(ids)} {'email' if len(ids) == 1 else 'emails'} via Zoho"
+        try:
+            pop = st.popover(label, key=f"zs_pop_{st.session_state.get('sent_log_ver', 0)}", disabled=not ids, **FULL_WIDTH)
+        except TypeError:
+            pop = st.popover(label, disabled=not ids, **FULL_WIDTH)
+        with pop:
+            idx = st.session_state.get("zs_from", 0)
+            frm = senders[idx] if 0 <= idx < len(senders) else senders[0]
+            st.markdown(f"Send **{len(ids)} emails** now from **{esc(frm['email'])}**?")
+            st.caption("This can't be undone. Each is logged on its Zoho lead.")
+            if st.button("Yes, send them now", type="primary", key="zs_confirm", **FULL_WIDTH):
+                send_via_zoho(ids, frm)
+                st.rerun()
+        st.caption(f"Sent via Zoho today: {sent_today} of {ZOHO_SEND_LIMIT}.")
+
+
 def _group_title(emoji: str, title: str, count: int, tone: str) -> None:
     render_html(
         f'<div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px 0">'
@@ -4076,12 +4702,13 @@ if queue:
                 "Phone": (queue[c]["lead"].phones_found or [""])[0],
                 "LinkedIn": getattr(queue[c]["lead"], "linkedin_url", None) or linkedin_people_url(queue[c]["lead"]),
                 "Website match": _website_label(queue[c]["lead"]),
+                "Zoho": zoho_label(c),
             } for c in ready_all])
             edited = _data_editor(
                 rdf, hide_index=True, num_rows="fixed", key=f"q_ready_{ver}",
                 height=min(38 + 35 * len(rdf), 390),
-                column_order=["Select", "Handled", "Firm", "Contact", "Email", "LinkedIn", "Phone", "Website match"],
-                disabled=["Firm", "Phone", "LinkedIn", "Website match"],
+                column_order=["Select", "Handled", "Firm", "Contact", "Email", "LinkedIn", "Phone", "Website match", "Zoho"],
+                disabled=["Firm", "Phone", "LinkedIn", "Website match", "Zoho"],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", width="small"),
                     "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once emailed. Saved permanently."),
@@ -4111,6 +4738,8 @@ if queue:
                     st.button("📦  Select firms to export", disabled=True, **FULL_WIDTH)
             with r2:
                 _mark_handled_popover(ready_sel, "firms", "pop_ready")
+            if zoho_on():
+                render_zoho_send_panel(ready_sel, log_now)
 
         # ===== 2. No email found =====
         _group_title("📞", "No email found", len(noemail_all), "warn")
@@ -4135,14 +4764,15 @@ if queue:
                 "LinkedIn": getattr(queue[c]["lead"], "linkedin_url", None) or linkedin_people_url(queue[c]["lead"]),
                 "Email": "",
                 "Website": queue[c].get("website_input") or (queue[c]["lead"].website_url or ""),
+                "Zoho": zoho_label(c),
                 "Why": ("📞 In call list" if c in calls_now else "No website" if not queue[c]["lead"].website_url
                         else "No email on site"),
             } for c in noemail_all])
             edited = _data_editor(
                 ndf, hide_index=True, num_rows="fixed", key=f"q_noemail_{ver}",
                 height=min(38 + 35 * len(ndf), 390),
-                column_order=["Select", "Handled", "Firm", "LinkedIn", "Contact", "Email", "Phone", "Website", "Why"],
-                disabled=["Firm", "Phone", "LinkedIn", "Why"],
+                column_order=["Select", "Handled", "Firm", "Zoho", "LinkedIn", "Contact", "Email", "Phone", "Website", "Why"],
+                disabled=["Firm", "Phone", "LinkedIn", "Why", "Zoho"],
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", width="small"),
                     "Handled": st.column_config.CheckboxColumn("Handled ✓", width="small", help="Tick once called or dealt with."),
