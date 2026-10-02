@@ -3091,6 +3091,10 @@ def push_to_zoho_leads(cns: List[str]) -> Dict[str, List[str]]:
     for n, cn_ in enumerate(todo, start=1):
         progress.progress(n / len(todo), text=f"Adding to Zoho {n} of {len(todo)} · {lead_display_name(queue[cn_]['lead'])}")
         cn, rec = _one(cn_)
+        if rec["status"] == "error" and "permission" in rec["error"].lower():
+            st.session_state["zoho_needs_scope"] = True  # Same for every firm, so stop and ask to reconnect
+            summary["error"].append("permission")
+            break
         summary[rec["status"]].append(rec.get("firm", cn) if rec["status"] != "error" else f"{rec['firm']}: {rec['error']}")
         if rec["status"] != "error":
             changes[cn] = rec
@@ -3571,8 +3575,13 @@ def run_enrichment(
         summary = push_to_zoho_leads(list(results))
         if zoho_summary_text(summary):
             st.info(zoho_summary_text(summary))
-        for err in summary["error"]:
-            st.warning("Zoho: couldn't add " + err)
+        if "permission" in summary["error"]:
+            st.warning("Zoho: the key in Secrets doesn't have all the permissions this app needs, so no firms were added."
+                       " Open **Reconnect Zoho** in the sidebar to get this app its own key, then use **Add firms not yet in Zoho**"
+                       " under Review & send.")
+        else:
+            for err in summary["error"]:
+                st.warning("Zoho: couldn't add " + err)
     if failures:
         st.warning("Couldn't enrich: " + ", ".join(failures))
     if len(rows) > 1 and results:
@@ -3668,10 +3677,14 @@ with st.sidebar:
     zoho_state = ('idle">Setup needed' if ZOHO.can_setup or (zoho_err and "invalid_code" in zoho_err)
                   else 'off">Error' if zoho_err else 'ok">Connected' if zoho_on() else 'idle">Not set up')
     render_html(f'<div class="pe-status">Zoho CRM<span class="st {zoho_state}</span></div>')
-    if ZOHO.can_setup or (zoho_err and ("invalid_code" in zoho_err or "permission" in zoho_err.lower())):
-        with st.expander("Connect Zoho", expanded=False):
+    needs_key = ZOHO.can_setup or st.session_state.get("zoho_needs_scope") or (
+        zoho_err and ("invalid_code" in zoho_err or "permission" in zoho_err.lower()))
+    if needs_key and not ZOHO.can_setup:
+        st.caption("⚠️ The Zoho key in Secrets is from another app and is missing permissions. Get this app its own key below.")
+    if ZOHO.client_id and ZOHO.client_secret:
+        with st.expander("Connect Zoho" if needs_key else "Reconnect Zoho (new key)", expanded=bool(needs_key)):
             render_zoho_setup()
-    elif zoho_err:
+    if zoho_err and not needs_key:
         st.caption("⚠️ " + zoho_err)
     elif zoho_on():
         st.session_state["zoho_auto"] = st.toggle(
@@ -4619,7 +4632,9 @@ def render_zoho_send_panel(ready_sel: List[str], log_now: Dict[str, Any]) -> Non
         missing = [c for c in st.session_state.get("queue_order", []) if c in st.session_state.get("queue", {}) and c not in store]
         if missing and st.button(f"➕  Add {len(missing)} firm(s) not yet in Zoho", key="zoho_add_missing"):
             s_ = push_to_zoho_leads(missing)
-            st.session_state["zoho_add_msg"] = zoho_summary_text(s_) or "Nothing new to add."
+            st.session_state["zoho_add_msg"] = (
+                "Zoho needs a new key first: open Connect Zoho in the sidebar." if "permission" in s_["error"]
+                else zoho_summary_text(s_) or ("Couldn't add: " + "; ".join(s_["error"][:3]) if s_["error"] else "Nothing new to add."))
             st.rerun()
         if st.session_state.get("zoho_add_msg"):
             st.info(st.session_state.pop("zoho_add_msg"))
