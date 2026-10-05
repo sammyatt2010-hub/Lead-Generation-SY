@@ -4336,12 +4336,14 @@ with st.sidebar:
     )
     # ---- Workspace switch (bookmarkable: ?view=calls) ----
     if "view" not in st.session_state:
-        st.session_state["view"] = "calls" if st.query_params.get("view") == "calls" else "prospect"
+        st.session_state["view"] = st.query_params.get("view") if st.query_params.get("view") in ("calls", "activity") else "prospect"
     _n_to_call = len(call_queue(get_call_list()))
+    _views = {"prospect": "🎯  Prospecting", "calls": "📞  Call list", "activity": "📊  Activity"}
+    if st.session_state["view"] not in _views:
+        st.session_state["view"] = "prospect"
     st.session_state["view"] = st.radio(
-        "Workspace", ["prospect", "calls"], key="w_view", label_visibility="collapsed",
-        index=0 if st.session_state["view"] == "prospect" else 1,
-        format_func=lambda v: "🎯  Prospecting" if v == "prospect" else "📞  Call list",
+        "Workspace", list(_views), key="w_view", label_visibility="collapsed",
+        index=list(_views).index(st.session_state["view"]), format_func=_views.get,
     )  # Labels stay fixed: a changing label would make Streamlit reset the switch
     if _n_to_call:
         render_html(f'<div style="font-size:.76rem;color:var(--muted);margin:-2px 0 6px 4px">'
@@ -4750,6 +4752,241 @@ def render_call_page() -> None:
                                        file_name=f"SY_Communications_call_list_{now_uk().strftime('%Y-%m-%d')}.csv",
                                        mime="text/csv", key="call_export", **FULL_WIDTH)
 
+
+
+
+# ==========================================
+# ACTIVITY DASHBOARD (this app's emails and leads, read from its own saved log)
+# ==========================================
+ACT_CSS = """
+<style>
+.st-key-card-act-chart,.st-key-card-act-table,.st-key-card-act-empty{background:linear-gradient(180deg,rgba(22,31,51,.85) 0%,rgba(17,24,39,.85) 100%);border:1px solid var(--border)!important;border-radius:var(--radius);padding:22px 22px 18px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 20px 40px -24px rgba(0,0,0,.6);margin-bottom:18px}
+.lo-kpis{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));gap:14px;margin-bottom:18px}
+@media (max-width:1000px){.lo-kpis{grid-template-columns:1fr}}
+.lo-kpi{background:linear-gradient(180deg,rgba(22,31,51,.9) 0%,rgba(17,24,39,.9) 100%);border:1px solid var(--border);border-top:3px solid var(--c);border-radius:14px;padding:16px 18px 14px}
+.lo-kpi .l{font-size:.95rem;font-weight:700;color:var(--text)}
+.lo-kpi .row{display:flex;align-items:flex-end;gap:24px;margin-top:12px}
+.lo-kpi .v{font-size:1.9rem;font-weight:800;letter-spacing:-.03em;color:var(--text);line-height:1}
+.lo-kpi .v.big{font-size:2.3rem}
+.lo-kpi .k{font-size:.72rem;color:var(--muted);margin-top:6px;font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+.lo-kpi .foot{font-size:.78rem;color:var(--muted);margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
+</style>
+"""
+
+
+def _act_when(value: Any) -> Optional[datetime]:
+    try:
+        d = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    uk = ZoneInfo("Europe/London")
+    return d.replace(tzinfo=uk) if d.tzinfo is None else d.astimezone(uk)
+
+
+def _act_is_email(rec: Dict[str, Any]) -> bool:
+    """A real email (sent from Zoho, or a draft ticked as sent). Not a call outcome or a 'handled, no email' tick."""
+    if str(rec.get("status") or "").startswith("Called"):
+        return False
+    return bool(rec.get("to")) or rec.get("via") == "zoho"
+
+
+def _act_how(rec: Dict[str, Any]) -> str:
+    return "Sent from Zoho" if rec.get("via") == "zoho" else "Email draft / ticked"
+
+
+def render_activity_page(title_html: str, colour: str, events: List[Dict[str, Any]],
+                         tiles: List[Tuple[str, List[str], str]], email_acts: List[str]) -> None:
+    """events: dicts with When, Activity, Firm, Contact, Email, Detail, By, How, Zoho.
+    tiles: (label, activities counted, footnote)."""
+    st.markdown(ACT_CSS, unsafe_allow_html=True)
+    today = now_uk().date()
+    df = pd.DataFrame(events, columns=["When", "Activity", "Firm", "Contact", "Email", "Detail", "By", "How", "Zoho"])
+    if not df.empty:
+        df = df.sort_values("When", ascending=False, na_position="last").reset_index(drop=True)
+    days = df["When"].apply(lambda d: d.date() if d else None) if not df.empty else pd.Series(dtype=object)
+
+    def n(acts: List[str], day=None) -> int:
+        if df.empty:
+            return 0
+        m = df["Activity"].isin(acts)
+        if day:
+            m &= days == day
+        return int(m.sum())
+
+    week_start = today - timedelta(days=today.weekday())
+    em_mask = df["Activity"].isin(email_acts) if not df.empty else pd.Series(dtype=bool)
+    pills = [
+        (n(email_acts, today), "Emails today", "active"),
+        (int((em_mask & days.apply(lambda d: bool(d) and d >= week_start)).sum()) if not df.empty else 0, "This week", ""),
+        (n(email_acts), "All time", ""),
+    ]
+    render_html(
+        '<div class="pe-hero"><div>'
+        '<div class="pe-eyebrow"><span class="dot"></span>Your activity · saved permanently</div>'
+        f'<div class="pe-title">{title_html}</div>'
+        '<div class="pe-sub">Every email and lead from this app, with a link straight to the record in Zoho.</div></div>'
+        '<div class="pe-stepper">'
+        + '<div class="pe-step-sep"></div>'.join(f'<div class="pe-step {c}"><span class="num">{v:,}</span>{esc(t)}</div>'
+                                                 for v, t, c in pills)
+        + "</div></div>",
+        target=hero_slot,
+    )
+    render_html(
+        f'<div class="lo-kpis" style="--n:{len(tiles)}">'
+        + "".join(
+            f'<div class="lo-kpi" style="--c:{colour}"><div class="l">{esc(label)}</div>'
+            f'<div class="row"><div><div class="v big">{n(acts, today):,}</div><div class="k">Today</div></div>'
+            f'<div><div class="v">{n(acts):,}</div><div class="k">Total</div></div></div>'
+            f'<div class="foot">{esc(foot)}</div></div>'
+            for label, acts, foot in tiles)
+        + "</div>"
+    )
+    if df.empty:
+        with st.container(key="card-act-empty"):
+            render_html(
+                '<div class="pe-empty"><div class="t">Nothing sent yet</div>'
+                '<div class="s">Emails and new Zoho leads appear here as soon as you send them.</div></div>')
+        return
+
+    # ---- Emails per day (last 14 days) ----
+    with st.container(key="card-act-chart"):
+        section_header("01", "Emails per day", "Last 14 days. Hover a bar for the number.")
+        start = today - timedelta(days=13)
+        em = df[em_mask].copy()
+        em["Day"] = em["When"].apply(lambda d: d.date() if d else None)
+        counts = em[em["Day"].apply(lambda d: bool(d) and d >= start)].groupby("Day").size()
+        daily = pd.DataFrame({"Day": [start + timedelta(days=i) for i in range(14)]})
+        daily["Emails"] = daily["Day"].map(counts).fillna(0).astype(int)
+        daily["Label"] = pd.to_datetime(daily["Day"]).dt.strftime("%a %d")
+        try:
+            import altair as alt
+            chart = (
+                alt.Chart(daily).mark_bar(color=colour, cornerRadiusTopLeft=4, cornerRadiusTopRight=4, size=26)
+                .encode(
+                    x=alt.X("Label:N", sort=list(daily["Label"]), title=None,
+                            axis=alt.Axis(labelAngle=0, labelColor="#8C98B0", domainColor="#2A3550", ticks=False)),
+                    y=alt.Y("Emails:Q", title=None,
+                            axis=alt.Axis(labelColor="#8C98B0", gridColor="#1F2A40", domain=False, ticks=False, tickMinStep=1)),
+                    tooltip=[alt.Tooltip("Label:N", title="Day"), alt.Tooltip("Emails:Q")],
+                )
+                .properties(height=220, background="transparent").configure_view(strokeWidth=0)
+            )
+            try:
+                st.altair_chart(chart, width="stretch")
+            except Exception:
+                st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            st.bar_chart(daily.set_index("Label")["Emails"], color=colour)
+
+    # ---- The table ----
+    with st.container(key="card-act-table"):
+        section_header("02", "All activity", "Newest first. Click Open to go to the record in Zoho.")
+        f1, f2, f3 = st.columns([1, 1.3, 1.6])
+        with f1:
+            period = st.selectbox("Period", ["Today", "Last 7 days", "Last 30 days", "This month", "All time"],
+                                  index=4, key="act_period")
+        with f2:
+            pick = st.multiselect("Activity", sorted(df["Activity"].unique()), default=[], placeholder="All activity",
+                                  key="act_kinds")
+        with f3:
+            q = st.text_input("Search", placeholder="Firm, contact, email or subject", key="act_q").strip().lower()
+        view = df.copy()
+        vdays = days.copy()
+        if period == "Today":
+            keep = vdays == today
+        elif period == "Last 7 days":
+            keep = vdays.apply(lambda d: bool(d) and d >= today - timedelta(days=6))
+        elif period == "Last 30 days":
+            keep = vdays.apply(lambda d: bool(d) and d >= today - timedelta(days=29))
+        elif period == "This month":
+            keep = vdays.apply(lambda d: bool(d) and d.year == today.year and d.month == today.month)
+        else:
+            keep = pd.Series(True, index=view.index)
+        view = view[keep]
+        if pick:
+            view = view[view["Activity"].isin(pick)]
+        if q:
+            hay = (view["Firm"].astype(str) + " " + view["Contact"].astype(str) + " " + view["Email"].astype(str)
+                   + " " + view["Detail"].astype(str) + " " + view["By"].astype(str)).str.lower()
+            view = view[hay.str.contains(q, regex=False)]
+        st.caption(f"Showing {len(view):,} of {len(df):,}.")
+        show = view.copy()
+        show["When"] = show["When"].apply(
+            lambda d: "" if not d else d.strftime("Today %H:%M") if d.date() == today
+            else d.strftime("%a %d %b %H:%M") if d.year == today.year else d.strftime("%d %b %Y"))
+        kwargs = dict(
+            hide_index=True, height=min(38 + 35 * max(len(show), 1), 600),
+            column_order=["When", "Activity", "Firm", "Contact", "Email", "Detail", "By", "How", "Zoho"],
+            column_config={
+                "When": st.column_config.TextColumn("When", width=128),
+                "Activity": st.column_config.TextColumn("Activity", width=125),
+                "Firm": st.column_config.TextColumn("Firm / customer", width="medium"),
+                "Contact": st.column_config.TextColumn("Contact", width="small"),
+                "Email": st.column_config.TextColumn("Email", width="medium"),
+                "Detail": st.column_config.TextColumn("Subject / detail", width="large"),
+                "By": st.column_config.TextColumn("By", width="small"),
+                "How": st.column_config.TextColumn("How", width=150),
+                "Zoho": st.column_config.LinkColumn("Zoho", width="small", display_text="Open ↗"),
+            },
+        )
+        try:
+            st.dataframe(show, width="stretch", **kwargs)
+        except Exception:
+            st.dataframe(show, use_container_width=True, **kwargs)
+        export = view.copy()
+        export["When"] = export["When"].apply(lambda d: d.strftime("%Y-%m-%d %H:%M") if d else "")
+        d1, _ = st.columns([1, 3])
+        with d1:
+            st.download_button("⬇  Download these rows (.csv)", data=export.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"{APP_NAME.replace(' ', '_')}_activity_{today.isoformat()}.csv",
+                               mime="text/csv", key="act_export", **FULL_WIDTH)
+    if not st.session_state.get("zoho_org_domain"):
+        st.caption("💡 Zoho links open in your default organisation. Connect Zoho in this session to make them exact.")
+
+
+def build_pe_activity() -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    zs = get_zoho_store()
+    for cn, r in zs.items():
+        if isinstance(r, dict) and r.get("status") == "created":
+            events.append({"When": _act_when(r.get("at")), "Activity": "Added to Zoho", "Firm": r.get("firm") or cn,
+                           "Contact": "", "Email": "", "Detail": "New lead created", "By": r.get("by") or "",
+                           "How": "Zoho", "Zoho": ZOHO.record_url(r["id"], "Leads") if r.get("id") else ""})
+    for cn, r in get_sent_log().items():
+        if not isinstance(r, dict):
+            continue
+        z = zs.get(cn) or {}
+        link = ZOHO.record_url(z["id"], "Accounts" if z.get("status") == "customer" else "Leads") if z.get("id") else ""
+        status = str(r.get("status") or "")
+        if status.startswith("Called"):
+            events.append({"When": _act_when(r.get("sent_at")), "Activity": "Call logged", "Firm": r.get("company_name") or cn,
+                           "Contact": r.get("contact") or "", "Email": "", "Detail": status.replace("Called · ", "Outcome: "),
+                           "By": r.get("sent_by") or "", "How": "Call list", "Zoho": link})
+        elif _act_is_email(r):
+            events.append({"When": _act_when(r.get("sent_at")), "Activity": "Emailed", "Firm": r.get("company_name") or cn,
+                           "Contact": r.get("contact") or "", "Email": r.get("to") or "",
+                           "Detail": r.get("subject") or r.get("vertical") or "", "By": r.get("sent_by") or "",
+                           "How": _act_how(r), "Zoho": link})
+    return events
+
+
+if st.session_state.get("view") == "activity":
+    render_activity_page(
+        "Prospect Engine <span>activity</span>", "#3987e5", build_pe_activity(),
+        [("New prospects added to Zoho", ["Added to Zoho"], "New leads only. Firms already in Zoho aren't counted."),
+         ("New prospects emailed", ["Emailed"], "Pitch emails, sent from Zoho or ticked as emailed"),
+         ("Calls logged", ["Call logged"], "Finished calls from the call list")],
+        ["Emailed"],
+    )
+    render_html(
+        '<div class="pe-stats">'
+        f'<div class="pe-stat"><div class="v">{sum(1 for r in get_zoho_store().values() if r.get("status") == "created")}</div><div class="l">New leads</div></div>'
+        f'<div class="pe-stat"><div class="v">{len(get_sent_log())}</div><div class="l">Handled</div></div>'
+        f'<div class="pe-stat"><div class="v">{len(call_queue(get_call_list()))}</div><div class="l">To call</div></div>'
+        "</div>",
+        target=sidebar_stats_slot,
+    )
+    st.stop()
 
 if st.session_state.get("view") == "calls":
     render_call_page()
