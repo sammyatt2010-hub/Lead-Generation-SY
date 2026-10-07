@@ -3850,47 +3850,60 @@ def send_via_zoho(cns: List[str], sender: Optional[Dict[str, Any]], origin: str 
     stamp = now_uk().strftime("%d %b %Y %H:%M")
     statuses = ZOHO.picklist(st.session_state.get("pe_lead_fields") or {}, "Lead_Status")
     progress = st.progress(0.0, text="Sending through Zoho…")
-    for n, cn in enumerate(cns, start=1):
-        item = queue.get(cn)
-        if not item:
-            continue
-        lead: ScrapedLead = item["lead"]
-        name = lead_display_name(lead)
-        progress.progress(n / len(cns), text=f"Sending {n} of {len(cns)} · {name}")
-        rec = store.get(cn) or {}
-        if rec.get("status") == "customer":
-            problems.append(f"{name}: already a customer in Zoho, so no new-business pitch was sent")
-            continue
-        if not rec.get("id"):
-            problems.append(f"{name}: couldn't add it to Zoho, so it wasn't sent")
-            continue
-        ensure_draft(item)
-        to = (item.get("to") or "").strip()
-        if not to or not clean_email(to) or not sender:
-            problems.append(f"{name}: no valid email address" if sender else f"{name}: no From address in Zoho")
-            continue
-        contact = infer_contact_name_and_role(lead, item["vertical"])[0]
-        try:
-            att = []
-            if st.session_state["opt_attach"]:
-                pdf = create_sector_overview_pdf(lead, item["vertical"])
-                att = [ZOHO.upload_file(f"SY_Communications_overview_{draft_filename_part(lead.company_name)}.pdf", pdf)]
-            ZOHO.send_mail(rec["id"], sender, to, "" if contact in ("Team", "there") else contact,
-                           item["subject"], _email_body_html(item["body"], item["subject"]), att)
-        except ZohoError as exc:
-            problems.append(f"{name}: not sent. {exc}")
-            continue
-        try:
-            if "Attempted to Contact" in statuses:
-                ZOHO.update_lead(rec["id"], {"Lead_Status": "Attempted to Contact"})
-            ZOHO.add_note(rec["id"], "Prospect Engine: pitch emailed",
-                          f"Emailed by {who} via Prospect Engine on {stamp}.\nTo: {to}\nSubject: {item['subject']}\n"
-                          f"Pitch: {item['vertical']}" + (" (overview PDF attached)" if st.session_state["opt_attach"] else ""))
-        except ZohoError as exc:
-            problems.append(f"{name}: sent, but the lead wasn't updated. {exc}")
-        sent_changes[cn] = dict(sent_record(item), via="zoho", status="Emailed via Zoho",
-                                from_address=sender.get("email", ""))
-        done.append(name)
+    try:
+        for n, cn in enumerate(cns, start=1):
+            item = queue.get(cn)
+            if not item:
+                continue
+            lead: ScrapedLead = item["lead"]
+            name = lead_display_name(lead)
+            progress.progress(n / len(cns), text=f"Sending {n} of {len(cns)} · {name}")
+            rec = store.get(cn) or {}
+            if rec.get("status") == "customer":
+                problems.append(f"{name}: already a customer in Zoho, so no new-business pitch was sent")
+                continue
+            if not rec.get("id"):
+                problems.append(f"{name}: couldn't add it to Zoho, so it wasn't sent")
+                continue
+            ensure_draft(item)
+            to = (item.get("to") or "").strip()
+            if not to or not clean_email(to) or not sender:
+                problems.append(f"{name}: no valid email address" if sender else f"{name}: no From address in Zoho")
+                continue
+            contact = infer_contact_name_and_role(lead, item["vertical"])[0]
+            try:
+                att = []
+                if st.session_state["opt_attach"]:
+                    pdf = create_sector_overview_pdf(lead, item["vertical"])
+                    att = [ZOHO.upload_file(f"SY_Communications_overview_{draft_filename_part(lead.company_name)}.pdf", pdf)]
+                ZOHO.send_mail(rec["id"], sender, to, "" if contact in ("Team", "there") else contact,
+                               item["subject"], _email_body_html(item["body"], item["subject"]), att)
+            except ZohoError as exc:
+                problems.append(f"{name}: not sent. {exc}")
+                continue
+            try:
+                if "Attempted to Contact" in statuses:
+                    ZOHO.update_lead(rec["id"], {"Lead_Status": "Attempted to Contact"})
+                ZOHO.add_note(rec["id"], "Prospect Engine: pitch emailed",
+                              f"Emailed by {who} via Prospect Engine on {stamp}.\nTo: {to}\nSubject: {item['subject']}\n"
+                              f"Pitch: {item['vertical']}" + (" (overview PDF attached)" if st.session_state["opt_attach"] else ""))
+            except ZohoError as exc:
+                problems.append(f"{name}: sent, but the lead wasn't updated. {exc}")
+            sent_changes[cn] = dict(sent_record(item), via="zoho", status="Emailed via Zoho",
+                                    from_address=sender.get("email", ""))
+            if len(sent_changes) >= 5:  # Save as we go, so nothing is lost if the page is interrupted
+                record_sent(dict(sent_changes))
+                sent_changes.clear()
+            done.append(name)
+    finally:
+        # Save whatever was sent even if the run is cut short (e.g. switching page mid-send)
+        if sent_changes:
+            try:
+                record_sent(dict(sent_changes))
+            except BaseException:  # Page stopping: save without touching the page, then let it stop
+                save_log_quietly(SENT_LOG, dict(sent_changes), "Prospect Engine: sends saved after the page was interrupted")
+                raise
+            sent_changes.clear()
     progress.empty()
     if sent_changes:
         record_sent(sent_changes)
@@ -3982,10 +3995,27 @@ for _k, _v in {"opt_branded": True, "opt_attach": True, "opt_switch": True, "que
     st.session_state.setdefault(_k, _v)
 
 
+def save_log_quietly(store: "SentLog", changes: Dict[str, Any], message: str) -> None:
+    """Used when the page is stopping mid-send (e.g. someone switched page): Streamlit calls aren't allowed then,
+    so save straight to GitHub and flag every session to reload the log on its next run."""
+    import sys as _sys
+    try:
+        store.apply(changes, message)
+    except Exception:
+        return
+    _sys._sy_log_epoch = getattr(_sys, "_sy_log_epoch", 0) + 1
+
+
+def _log_epoch() -> int:
+    import sys as _sys
+    return getattr(_sys, "_sy_log_epoch", 0)
+
+
 def get_sent_log() -> Dict[str, Any]:
     """Loaded once per session; refreshed after every change (and by the sidebar Refresh button)."""
-    if "sent_log_data" not in st.session_state:
+    if "sent_log_data" not in st.session_state or st.session_state.get("sent_log_data_epoch") != _log_epoch():
         st.session_state["sent_log_data"] = SENT_LOG.load()
+        st.session_state["sent_log_data_epoch"] = _log_epoch()
     return st.session_state["sent_log_data"]
 
 
