@@ -3594,12 +3594,19 @@ class ZohoCRM:
                 "Parent_Id": {"module": {"api_name": "Leads"}, "id": record_id}}
         self._row_result(self._request("POST", f"/crm/v8/Leads/{record_id}/Notes", json={"data": [note]}))
 
+    def record_tags(self, module: str, record_id: str) -> List[str]:
+        body = self._request("GET", f"/crm/v8/{module}/{record_id}", params={"fields": "Tag"}) or {}
+        rec = (body.get("data") or [{}])[0]
+        return [str(t.get("name") if isinstance(t, dict) else t) for t in (rec.get("Tag") or [])]
+
     def record_url(self, record_id: str, module: str = "Leads") -> str:
         dom = st.session_state.get("zoho_org_domain")
         base = f"{self.crm_url}/crm/{dom}" if dom else f"{self.crm_url}/crm"
         return f"{base}/tab/{module}/{record_id}"
 
 ZOHO = ZohoCRM()
+# Firms already in Zoho with a tag containing these words are never pitched (e.g. "Not Interested")
+BLOCKED_TAG_WORDS = ("not interested",)
 ZOHO_STORE = SentLog("GITHUB_ZOHO_LEADS_PATH", "zoho_leads.json", ".zoho_leads.json")
 UK_POSTCODE_RE = re.compile(r"^[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}$", re.I)
 
@@ -3763,7 +3770,7 @@ def push_to_zoho_leads(cns: List[str]) -> Dict[str, List[str]]:
     queue = st.session_state.get("queue", {})
     store = get_zoho_store()
     todo = [cn for cn in cns if cn in queue and cn not in store]
-    summary: Dict[str, List[str]] = {"created": [], "existing": [], "customer": [], "error": []}
+    summary: Dict[str, List[str]] = {"created": [], "existing": [], "customer": [], "not_interested": [], "error": []}
     if not todo:
         return summary
     stamp = now_uk().isoformat(timespec="seconds")
@@ -3777,6 +3784,12 @@ def push_to_zoho_leads(cns: List[str]) -> Dict[str, List[str]]:
         try:
             hit = find_in_zoho(lead, email, phone)
             if hit:
+                try:  # Already in Zoho and tagged Not Interested: never pitch them
+                    tags = ZOHO.record_tags("Accounts" if hit["status"] == "customer" else "Leads", hit["id"])
+                    if any(w in t.lower() for t in tags for w in BLOCKED_TAG_WORDS):
+                        hit = dict(hit, status="not_interested")
+                except ZohoError:
+                    pass
                 return cn, dict(hit, at=stamp, by=who, firm=lead_display_name(lead))
             lid = ZOHO.create_lead(zoho_lead_fields(item, cn))
             rec = get_sent_log().get(cn)
@@ -3815,6 +3828,9 @@ def zoho_summary_text(s: Dict[str, List[str]]) -> Optional[str]:
         bits.append(f"{len(s['existing'])} already in Zoho, so not duplicated")
     if s["customer"]:
         bits.append(f"{len(s['customer'])} already a customer: " + ", ".join(s["customer"][:3]))
+    if s.get("not_interested"):
+        bits.append(f"{len(s['not_interested'])} tagged Not Interested, so they won't be contacted: "
+                    + ", ".join(s["not_interested"][:3]))
     return ("Zoho: " + " · ".join(bits) + ".") if bits else None
 
 
@@ -3822,7 +3838,8 @@ def zoho_label(cn: str) -> str:
     rec = get_zoho_store().get(cn)
     if not rec:
         return ""
-    return {"created": "✓ New lead", "existing": "• Already a lead", "customer": "⚠ Customer"}.get(rec.get("status"), "")
+    return {"created": "✓ New lead", "existing": "• Already a lead", "customer": "⚠ Customer",
+            "not_interested": "⛔ Not interested"}.get(rec.get("status"), "")
 
 
 def zoho_sent_today(log: Dict[str, Any]) -> int:
@@ -3859,6 +3876,9 @@ def send_via_zoho(cns: List[str], sender: Optional[Dict[str, Any]], origin: str 
             name = lead_display_name(lead)
             progress.progress(n / len(cns), text=f"Sending {n} of {len(cns)} · {name}")
             rec = store.get(cn) or {}
+            if rec.get("status") == "not_interested":
+                problems.append(f"{name}: tagged Not Interested in Zoho, so it wasn't sent")
+                continue
             if rec.get("status") == "customer":
                 problems.append(f"{name}: already a customer in Zoho, so no new-business pitch was sent")
                 continue
@@ -5677,8 +5697,10 @@ if queue:
         log_now = get_sent_log()
         for c in queue_order:
             ensure_draft(queue[c])
-        ready_all = [c for c in queue_order if c not in log_now and queue[c]["to"]]
-        noemail_all = [c for c in queue_order if c not in log_now and not queue[c]["to"]]
+        _zs = get_zoho_store()
+        not_interested = [c for c in queue_order if (_zs.get(c) or {}).get("status") == "not_interested"]
+        ready_all = [c for c in queue_order if c not in log_now and queue[c]["to"] and c not in not_interested]
+        noemail_all = [c for c in queue_order if c not in log_now and not queue[c]["to"] and c not in not_interested]
         handled_all = [c for c in queue_order if c in log_now]
         ver = st.session_state.get("queue_editor_ver", 0)
         stamp = now_uk().strftime("%Y-%m-%d_%H%M")
@@ -5688,6 +5710,10 @@ if queue:
             f"{len(queue_order)} enriched · {len(ready_all)} ready to email · {len(noemail_all)} no email found"
             f" · {len(handled_all)} handled",
         )
+        if not_interested:
+            st.caption("⛔ Left out, tagged Not Interested in Zoho: "
+                       + ", ".join(lead_display_name(queue[c]["lead"]) for c in not_interested[:6])
+                       + ("…" if len(not_interested) > 6 else ""))
 
         # ===== 1. Ready to email =====
         _group_title("✉️", "Ready to email", len(ready_all), "good")
