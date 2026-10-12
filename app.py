@@ -780,7 +780,92 @@ def extract_emails(soup: BeautifulSoup, html: str) -> Set[str]:
         em = clean_email(raw)
         if em:
             found.add(em)
+    found |= spelled_out_emails(text)
     return found
+
+
+
+# Emails worded out to dodge spam bots: "kieran at klmtyres dot co dot uk"
+SPELLED_EMAIL_RE = re.compile(r"\b([a-z0-9._%+-]{2,40})\s+at\s+([a-z0-9-]{2,40}(?:\s+dot\s+[a-z]{2,10}){1,3})\b", re.I)
+# Other organisations' addresses that turn up on firms' sites (regulators, schemes, portals, web hosts)
+THIRD_PARTY_EMAIL_MARKERS = (
+    "gov.uk", "ico.org.uk", "fca.org.uk", "sra.org.uk", "cqc.org.uk", "nhs.uk", "police.uk", "citizensadvice",
+    "ombudsman", "propertymark", "tpos.co.uk", "theprs.co.uk", "rics.org", "trustpilot", "checkatrade",
+    "trustatrader", "yell.com", "which.co.uk", "safeagent", "depositprotection", "mydeposits", "tenancydeposit",
+    "rightmove", "zoopla", "onthemarket", "wix.com", "squarespace", "godaddy", "123-reg", "ionos", "google.com",
+    "facebook", "instagram", "linkedin", "companieshouse", "lawsociety", "bark.com", "nextdoor",
+)
+# "Website by Acme Digital", "Designed by…", "Powered by…": that link is the web agency, not the firm
+CREDIT_RE = re.compile(r"\b(website|site|web\s*design|designed|developed|built|powered|hosted|created|seo|marketing|managed)"
+                       r"\s+(by|with)\b", re.I)
+
+
+def raw_html_emails(html: str) -> Set[str]:
+    """Addresses anywhere in the page source (attributes, scripts). Only trusted when they match the firm."""
+    found: Set[str] = set()
+    for raw in EMAIL_RE.findall(html or ""):
+        em = clean_email(raw)
+        if em:
+            found.add(em)
+    return found
+
+
+def spelled_out_emails(text: str) -> Set[str]:
+    found: Set[str] = set()
+    for local, rest in SPELLED_EMAIL_RE.findall(text or ""):
+        dom = re.sub(r"\s+dot\s+", ".", rest, flags=re.I)
+        em = clean_email(local + "@" + dom)
+        if em:
+            found.add(em)
+    return found
+
+
+def credited_domains(soup: BeautifulSoup) -> Set[str]:
+    """Domains linked from 'Website by…' style credits (web agencies)."""
+    out: Set[str] = set()
+    for a in soup.find_all("a", href=True):
+        ctx = a.get_text(" ", strip=True) + " " + (a.parent.get_text(" ", strip=True)[:160] if a.parent else "")
+        if CREDIT_RE.search(ctx):
+            d = domain_of(a["href"]) if a["href"].startswith("http") else None
+            if d:
+                out.add(d)
+    return out
+
+
+def _email_label(domain: str) -> str:
+    """'klmtyres.co.uk' -> 'klmtyres'; 'mail.smith-law.com' -> 'smithlaw'."""
+    parts = (domain or "").lower().split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "org", "ltd", "plc", "me", "net", "ac", "gov", "nhs"):
+        label = parts[-3]
+    else:
+        label = parts[-2] if len(parts) >= 2 else parts[0]
+    return re.sub(r"[^a-z0-9]", "", label)
+
+
+def domain_matches_business(domain: str, names: List[str]) -> bool:
+    """Does an email's domain look like the firm's own name? e.g. klmtyres.co.uk for 'KLM TYRES LIMITED'."""
+    lab = _email_label(domain)
+    if len(lab) < 3:
+        return False
+    for name in names:
+        if not name:
+            continue
+        words = [w for w in re.sub(r"[^a-z0-9 ]", " ", name.lower().replace("&", " and ")).split()
+                 if w.upper() not in LEGAL_SUFFIX_WORDS and w not in ("and", "the")]
+        core = "".join(words)
+        if len(core) >= 4 and (core == lab or core in lab or (len(lab) >= 5 and lab in core)):
+            return True
+        if words and len(core) >= 4 and all(w in lab for w in words):
+            return True
+        distinct = [t for t in distinctive_name_tokens(name) if len(t) >= 3]
+        if distinct and sum(len(t) for t in distinct) >= 4 and all(t in lab for t in distinct):
+            return True
+    return False
+
+
+def is_third_party_email(email: str, agency_domains: Set[str]) -> bool:
+    dom = email.split("@", 1)[-1]
+    return any(m in dom for m in THIRD_PARTY_EMAIL_MARKERS) or any(dom == a or dom.endswith("." + a) for a in agency_domains)
 
 
 def normalise_uk_phone(raw: str) -> Optional[str]:
@@ -1367,13 +1452,17 @@ class LeadEnricher:
                 pages.append(url)
         return pages[:4]
 
-    def scrape_contact_channels(self, base_url: str) -> Dict[str, Any]:
+    def scrape_contact_channels(self, base_url: str, names: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Emails and phones from the firm's site: home page, contact/about/team pages, then (if still no email)
+        privacy, terms and the usual contact addresses. `names` (company / trading name) lets an email on a
+        different domain count when it's clearly the firm's own, e.g. kieran@klmtyres.co.uk on millomtyrecentre.co.uk."""
         empty = {"emails": [], "other_emails": [], "phones": [], "description": "",
-                 "resolved_url": None, "pages_checked": []}
+                 "resolved_url": None, "pages_checked": [], "notes": []}
         if not base_url:
             return empty
         if not base_url.startswith("http"):
             base_url = f"https://{base_url}"
+        names = [n for n in (names or []) if n]
 
         home = self._fetch_html(base_url)
         if not home and base_url.startswith("https://"):
@@ -1397,42 +1486,112 @@ class LeadEnricher:
                 if page:
                     pages_html.append((page[0], page[1]))
 
-        email_hits: Dict[str, int] = {}
+        email_hits: Dict[str, int] = {}   # seen on the page itself (links, text, Cloudflare-protected)
+        raw_hits: Set[str] = set()        # anywhere in the page source
+        agencies: Set[str] = set()
         phone_scores: Dict[str, int] = {}
         description = ""
+        notes: List[str] = []
 
-        for _, html in pages_html:
-            soup = BeautifulSoup(html, "html.parser")
-            if not description:
-                for attrs in ({"name": "description"}, {"property": "og:description"}):
-                    tag = soup.find("meta", attrs=attrs)
-                    if tag and tag.get("content"):
-                        description = tag["content"].strip()
-                        break
-            for em in extract_emails(soup, html):
-                email_hits[em] = email_hits.get(em, 0) + 1
-            for ph, weight in extract_phones(soup, html):
-                phone_scores[ph] = phone_scores.get(ph, 0) + weight
+        def read_pages(pages: List[Tuple[str, str]]) -> None:
+            nonlocal description
+            for _, html in pages:
+                soup = BeautifulSoup(html, "html.parser")
+                if not description:
+                    for attrs in ({"name": "description"}, {"property": "og:description"}):
+                        tag = soup.find("meta", attrs=attrs)
+                        if tag and tag.get("content"):
+                            description = tag["content"].strip()
+                            break
+                for em in extract_emails(soup, html):
+                    email_hits[em] = email_hits.get(em, 0) + 1
+                raw_hits.update(raw_html_emails(html))
+                agencies.update(credited_domains(soup))
+                for ph, weight in extract_phones(soup, html):
+                    phone_scores[ph] = phone_scores.get(ph, 0) + weight
 
-        own, freemail, other = [], [], []
-        for em in email_hits:
+        def is_own(dom: str) -> bool:
+            return bool(site_domain) and (dom == site_domain or dom.endswith("." + site_domain) or site_domain.endswith("." + dom))
+
+        def sort_out() -> Tuple[List[str], List[str], List[str]]:
+            own, freemail, other = [], [], []
+            for em in sorted(set(email_hits) | raw_hits):
+                dom = em.split("@", 1)[1]
+                seen = em in email_hits
+                if is_own(dom):
+                    own.append(em)
+                elif is_third_party_email(em, agencies - {site_domain}):
+                    if seen:
+                        other.append(em)
+                elif domain_matches_business(dom, names):
+                    own.append(em)
+                elif dom in FREE_MAIL_DOMAINS:
+                    if seen:
+                        freemail.append(em)
+                elif seen:
+                    other.append(em)
+            return own, freemail, other
+
+        read_pages(pages_html)
+        own, freemail, other = sort_out()
+
+        # Still nothing: privacy/terms pages and the usual contact addresses often carry the email
+        if not own and not freemail:
+            fetched = {u.rstrip("/") for u, _ in pages_html} | {u.rstrip("/") for u in extra_pages}
+            more: List[str] = []
+            for a in home_soup.find_all("a", href=True):
+                href = urljoin(root + "/", a["href"].strip()).split("#")[0].rstrip("/")
+                label = (urlparse(href).path + " " + a.get_text(" ", strip=True)).lower()
+                if domain_of(href) == site_domain and any(w in label for w in ("privacy", "terms", "legal", "gdpr", "imprint")):
+                    more.append(href)
+            more += [urljoin(root, p).rstrip("/") for p in ("/contact", "/contact-us", "/contactus", "/get-in-touch",
+                                                           "/about", "/about-us", "/privacy-policy", "/privacy")]
+            more = [u for u in dict.fromkeys(more) if u not in fetched][:6]
+            if more:
+                second: List[Tuple[str, str]] = []
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    for url, page in zip(more, pool.map(self._fetch_html, more)):
+                        if page:
+                            second.append((page[0], page[1]))
+                read_pages(second)
+                pages_html += second
+                own, freemail, other = sort_out()
+
+        # Last check for a lone address on another domain: does that domain lead back to this site?
+        if not own and not freemail and other:
+            for dom in list(dict.fromkeys(e.split("@", 1)[1] for e in other))[:2]:
+                if self._domain_points_to(dom, site_domain):
+                    moved = [e for e in other if e.split("@", 1)[1] == dom]
+                    own += moved
+                    other = [e for e in other if e not in moved]
+                    notes.append(f"Email on {dom} accepted: that address's website leads back to {site_domain}")
+                    break
+        for em in own:
             dom = em.split("@", 1)[1]
-            if dom == site_domain or dom.endswith("." + site_domain) or site_domain.endswith("." + dom):
-                own.append(em)
-            elif dom in FREE_MAIL_DOMAINS:
-                freemail.append(em)
-            else:
-                other.append(em)
+            if not is_own(dom) and not any(dom in n for n in notes):
+                notes.append(f"Email on {dom} accepted: the domain matches the business name")
 
         phones = sorted(phone_scores, key=lambda p: (-phone_scores[p], p))[:5]
         return {
-            "emails": sorted(own) + sorted(freemail),
-            "other_emails": sorted(other),
+            "emails": sorted(set(own)) + sorted(set(freemail)),
+            "other_emails": sorted(set(other)),
             "phones": phones,
             "description": description,
             "resolved_url": root,
             "pages_checked": [u for u, _ in pages_html],
+            "notes": notes,
         }
+
+    def _domain_points_to(self, email_domain: str, site_domain: Optional[str]) -> bool:
+        """True if the email's domain redirects to, or links to, the firm's website."""
+        if not site_domain or any(m in email_domain for m in THIRD_PARTY_EMAIL_MARKERS):
+            return False
+        for url in (f"https://{email_domain}", f"https://www.{email_domain}"):
+            page = self._fetch_html(url, timeout=5)
+            if page:
+                final_dom = domain_of(page[0]) or ""
+                return final_dom == site_domain or site_domain in page[1][:300000]
+        return False
 
     def enrich_selected_company(
         self,
@@ -1494,12 +1653,12 @@ class LeadEnricher:
             target_website = discovery.get("url")
 
         site_contacts = (
-            self.scrape_contact_channels(target_website)
+            self.scrape_contact_channels(target_website, names=[company_name, trading_name or ""])
             if target_website
             else {"emails": [], "other_emails": [], "phones": [], "description": "",
-                  "resolved_url": None, "pages_checked": []}
+                  "resolved_url": None, "pages_checked": [], "notes": []}
         )
-        notes = free_notes + list(discovery.get("notes", []))
+        notes = free_notes + list(discovery.get("notes", [])) + list(site_contacts.get("notes") or [])
         if getattr(self, "last_places_note", None):
             notes.insert(len(free_notes), self.last_places_note)
         phones = list(site_contacts["phones"])
@@ -4280,6 +4439,62 @@ def add_to_queue(lead: ScrapedLead, vertical: str) -> None:
     bump_queue_editor()
 
 
+def rescan_for_emails(cns: List[str]) -> Tuple[int, int, int]:
+    """Looks at each firm's website again with the current email finder (no Companies House or Google lookups).
+    Firms where an email turns up move to Ready to email, and new Zoho leads get the email too.
+    Returns (looked at, emails found, Zoho leads updated)."""
+    queue = st.session_state.get("queue", {})
+    todo = [c for c in cns if c in queue and queue[c]["lead"].website_url]
+    if not todo:
+        return 0, 0, 0
+    progress = st.progress(0.0, text="Looking again…")
+
+    def _one(c: str) -> Tuple[str, Dict[str, Any]]:
+        lead = queue[c]["lead"]
+        return c, LeadEnricher(ch_api_key=ch_api_key).scrape_contact_channels(
+            lead.website_url, names=[lead.company_name, lead.trading_name or ""])
+
+    found: List[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(todo))) as pool:
+        futures = [pool.submit(_one, c) for c in todo]
+        for n, fut in enumerate(as_completed(futures), start=1):
+            try:
+                c, res = fut.result()
+            except Exception:
+                progress.progress(n / len(todo), text=f"Looked again at {n} of {len(todo)}")
+                continue
+            lead = queue[c]["lead"]
+            emails, _dead = filter_deliverable(res.get("emails") or [])
+            if emails:
+                lead.emails_found = emails
+                lead.other_emails = res.get("other_emails") or []
+                lead.discovery_notes = list(lead.discovery_notes) + ["Looked again: " + (n_ or "email found on the site")
+                                                                     for n_ in (res.get("notes") or [""])]
+                if not lead.phones_found and res.get("phones"):
+                    lead.phones_found = res["phones"]
+                contact, _ = infer_contact_name_and_role(lead, queue[c]["vertical"])
+                queue[c]["to"] = pick_primary_email(lead, contact) or ""
+                queue[c]["to_ver"] = queue[c].get("to_ver", 0) + 1
+                queue[c]["subject"] = queue[c]["body"] = queue[c]["sig"] = None
+                found.append(c)
+            progress.progress(n / len(todo), text=f"Looked again at {n} of {len(todo)} · {lead_display_name(lead)}")
+    progress.empty()
+
+    updated = 0
+    if found and zoho_on():  # Leads this app created had no email: add it, so Lead Revival and MY PA can use it too
+        store = get_zoho_store()
+        for c in found:
+            rec = store.get(c) or {}
+            if rec.get("status") == "created" and rec.get("id") and queue[c]["to"]:
+                try:
+                    ZOHO.update_lead(rec["id"], {"Email": queue[c]["to"]})
+                    updated += 1
+                except ZohoError:
+                    pass
+    bump_queue_editor()
+    return len(todo), len(found), updated
+
+
 def run_enrichment(
     rows: List[Dict[str, Any]],
     vertical: str,
@@ -5839,6 +6054,20 @@ if queue:
             if no_phone:
                 st.caption(f"💡 {len(no_phone)} selected {'firm has' if len(no_phone) == 1 else 'firms have'} no phone number,"
                            " so can't go on the call list. Paste their website and hit Retry to look again.")
+            look_ids = [c for c in noemail_sel if c not in retry_ids and queue[c]["lead"].website_url]
+            if st.button(f"🔎  Look again for emails on {len(look_ids)} {'website' if len(look_ids) == 1 else 'websites'}",
+                         disabled=not look_ids, key="look_again", **FULL_WIDTH,
+                         help="Checks the selected firms' websites again with the improved email finder (contact,"
+                              " privacy and terms pages, and emails on a different domain that match the firm's name)."
+                              " No Companies House or Google lookups, so it's quick and free."):
+                n_look, n_found, n_zoho = rescan_for_emails(look_ids)
+                st.session_state["calls_flash_look"] = (
+                    f"Looked again at {n_look} websites: found an email for {n_found}"
+                    + (f" (now under Ready to email{f'; added to {n_zoho} Zoho leads' if n_zoho else ''})." if n_found else ".")
+                )
+                st.rerun()
+            if st.session_state.get("calls_flash_look"):
+                st.success(st.session_state.pop("calls_flash_look"))
             n1, n2, n3 = st.columns(3)
             with n1:
                 if st.button(f"🔁  Retry {len(retry_ids)} with new website", disabled=not retry_ids, **FULL_WIDTH,
