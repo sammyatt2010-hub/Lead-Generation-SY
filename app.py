@@ -2642,6 +2642,506 @@ NEW_KEYWORDS = {
     "Contact Centres & Customer Service": ("contact centre", "call centre", "telemarketing", "customer service"),
 }
 
+# ---- More sectors: office-based firms that almost always publish an email address ----
+MORE_PRESETS = {
+    "Architects & Surveyors": {
+        "sic_codes": ["71111", "71112", "74902"],
+        "description": "Architectural, planning & quantity surveying practices",
+        "search_hint": "Architects",
+        "crms": ["Archioffice", "Synergy", "Mosaic", "Microsoft 365"],
+        "primary_hook": "Project-based call logging & mobile working",
+        "fallback_greeting": "Practice Team",
+        "pitch_bullets": [
+            "Client and project calls logged against the right job automatically",
+            "Architects on site take office calls on their mobile app, on the business number",
+            "Call recording for instructions, variations and disputes",
+            "One number for every office, routed to whoever's free",
+        ],
+        "default_cta": "Let me know how many people take calls across the practice, and I'll send an indicative quote.",
+    },
+    "Physiotherapy & Private Clinics": {
+        "sic_codes": ["86900", "86220"],
+        "description": "Physiotherapy, chiropractic, osteopathy & private specialist clinics",
+        "search_hint": "Clinic",
+        "crms": ["Cliniko", "Jane", "WriteUpp", "Semble"],
+        "primary_hook": "Booking System Integration (Cliniko / Jane / WriteUpp)",
+        "fallback_greeting": "Clinic Team",
+        "pitch_bullets": [
+            "Patient record on screen the moment they call",
+            "Calls queue instead of ringing out while practitioners are treating",
+            "Missed calls flagged so every booking enquiry is returned",
+            "Practitioners take calls on the clinic number from their mobile",
+        ],
+        "default_cta": "Let me know which booking system you use and how many people answer the phone, and I'll send a quote.",
+    },
+    "Funeral Directors": {
+        "sic_codes": ["96030"],
+        "description": "Funeral and related activities",
+        "search_hint": "Funeral",
+        "crms": ["Funeral Manager", "Arka", "Halo", "Microsoft 365"],
+        "primary_hook": "24/7 call handling that never misses a family",
+        "fallback_greeting": "Funeral Team",
+        "pitch_bullets": [
+            "Calls follow the on-call director to their mobile, day and night",
+            "Every call answered, with overflow to a trained answering team if needed",
+            "One number across every branch",
+            "Recorded calls for arrangements and peace of mind",
+        ],
+        "default_cta": "Let me know how many branches and directors take calls, and I'll send an indicative quote.",
+    },
+    "Nurseries & Childcare": {
+        "sic_codes": ["85100", "88910"],
+        "description": "Pre-school, nursery & child day-care providers",
+        "search_hint": "Nursery",
+        "crms": ["Famly", "Blossom", "iConnect", "Connect Childcare"],
+        "primary_hook": "Parent calls answered, even when staff are in the room",
+        "fallback_greeting": "Nursery Manager",
+        "pitch_bullets": [
+            "Calls ring the office and the manager's mobile together",
+            "Calls queue instead of ringing out during drop-off and pick-up",
+            "Missed calls from parents and new enquiries flagged straight away",
+            "One number across every setting",
+        ],
+        "default_cta": "Let me know how many settings you run and who answers the phone, and I'll send a quote.",
+    },
+    "Marketing & Creative Agencies": {
+        "sic_codes": ["73110", "74100", "70210"],
+        "description": "Advertising, design, PR & communications agencies",
+        "search_hint": "Agency",
+        "crms": ["HubSpot", "Pipedrive", "Salesforce", "Monday.com"],
+        "primary_hook": "CRM Integration (HubSpot / Pipedrive / Salesforce)",
+        "fallback_greeting": "Agency Team",
+        "pitch_bullets": [
+            "Click-to-dial from HubSpot or Pipedrive, with every call logged",
+            "Softphone on laptop and mobile for a hybrid team",
+            "Client calls routed to the account manager, wherever they are",
+            "Call recording for briefs, approvals and new business calls",
+        ],
+        "default_cta": "Let me know which CRM you use and how many people are in the team, and I'll send an indicative quote.",
+    },
+    "Business Consultants": {
+        "sic_codes": ["70229"],
+        "description": "Management & business consultancy",
+        "search_hint": "Consulting",
+        "crms": ["HubSpot", "Salesforce", "Pipedrive", "Microsoft Dynamics"],
+        "primary_hook": "A professional business number on every device",
+        "fallback_greeting": "Consulting Team",
+        "pitch_bullets": [
+            "One business number on desk, laptop and mobile",
+            "Calls logged in your CRM automatically",
+            "Recorded calls for client instructions and coaching",
+            "Call routing so clients always reach a person",
+        ],
+        "default_cta": "Let me know how many consultants you have and which CRM you use, and I'll send a quote.",
+    },
+    "Cleaning & Facilities Services": {
+        "sic_codes": ["81210", "81221", "81222", "81229"],
+        "description": "Commercial cleaning, window cleaning & facilities services",
+        "search_hint": "Cleaning",
+        "crms": ["CleanDesk", "Swept", "Jobber", "ServiceM8"],
+        "primary_hook": "Job-system integration & mobile teams",
+        "fallback_greeting": "Operations Team",
+        "pitch_bullets": [
+            "New contract enquiries answered, not lost to voicemail",
+            "Supervisors take office calls on their mobile app",
+            "Every call logged against the client and site",
+            "Out-of-hours calls routed to whoever is on duty",
+        ],
+        "default_cta": "Let me know how many office staff and supervisors take calls, and I'll send an indicative quote.",
+    },
+    "Removals & Storage": {
+        "sic_codes": ["49420", "52103"],
+        "description": "Removal services, self-storage & warehousing",
+        "search_hint": "Removals",
+        "crms": ["MoveMan", "Moveware", "Removals Manager", "SpaceManager"],
+        "primary_hook": "Quote enquiries answered first time",
+        "fallback_greeting": "Removals Team",
+        "pitch_bullets": [
+            "Every quote enquiry answered, even when the team is out on a move",
+            "Calls ring the office and surveyors' mobiles together",
+            "Missed calls flagged so no booking goes to a competitor",
+            "Recorded calls for quotes, inventories and disputes",
+        ],
+        "default_cta": "Let me know how many people take bookings, and I'll send an indicative quote.",
+    },
+    "Travel Agents": {
+        "sic_codes": ["79110", "79120", "79909"],
+        "description": "Travel agencies & tour operators",
+        "search_hint": "Travel",
+        "crms": ["Travelport", "Dolphin Dynamics", "Inspiretec", "TravelPerk"],
+        "primary_hook": "Booking-system screen-pop & homeworker routing",
+        "fallback_greeting": "Travel Team",
+        "pitch_bullets": [
+            "Customer booking on screen as the phone rings",
+            "Homeworkers on the same number, with calls routed to them",
+            "Calls recorded for bookings, changes and complaints",
+            "Queue messages and callbacks at busy times",
+        ],
+        "default_cta": "Let me know how many consultants (including homeworkers) you have, and I'll send a quote.",
+    },
+    "Pharmacies": {
+        "sic_codes": ["47730"],
+        "description": "Dispensing chemists & independent pharmacies",
+        "search_hint": "Pharmacy",
+        "crms": ["PharmOutcomes", "ProScript", "Titan", "Positive Solutions"],
+        "primary_hook": "Prescription calls queued, not lost",
+        "fallback_greeting": "Pharmacy Team",
+        "pitch_bullets": [
+            "Calls queue with a message instead of ringing out at the counter",
+            "Options to route prescription, delivery and GP calls",
+            "Missed calls flagged so patients get a call back",
+            "One number across every branch",
+        ],
+        "default_cta": "Let me know how many branches and phones you have, and I'll send an indicative quote.",
+    },
+    "Charities & Membership Organisations": {
+        "sic_codes": ["88990", "94990"],
+        "description": "Charities, community groups & membership bodies",
+        "search_hint": "Trust",
+        "crms": ["Beacon", "Donorfy", "Salesforce Nonprofit", "Raiser's Edge"],
+        "primary_hook": "Lower costs and staff, volunteers and helplines on one system",
+        "fallback_greeting": "Office Team",
+        "pitch_bullets": [
+            "Staff and volunteers on one system, on desk, laptop or mobile",
+            "Helpline calls queued and routed to whoever's available",
+            "Calls logged against supporters in your CRM",
+            "Lower monthly costs than traditional lines",
+        ],
+        "default_cta": "Let me know how many staff and volunteers take calls, and I'll send an indicative quote.",
+    },
+    "Training & Education Providers": {
+        "sic_codes": ["85590", "85600"],
+        "description": "Training companies, tutors & education support services",
+        "search_hint": "Training",
+        "crms": ["Accelerate", "Arlo", "HubSpot", "Bud"],
+        "primary_hook": "Course enquiries answered and logged",
+        "fallback_greeting": "Training Team",
+        "pitch_bullets": [
+            "Every course enquiry answered and logged",
+            "Trainers take calls on the business number while out delivering",
+            "Click-to-dial from your CRM",
+            "Call stats to see how many enquiries you're getting",
+        ],
+        "default_cta": "Let me know how many people take enquiries, and I'll send an indicative quote.",
+    },
+    "Gyms & Fitness Studios": {
+        "sic_codes": ["93130"],
+        "description": "Gyms, fitness studios & leisure facilities",
+        "search_hint": "Fitness",
+        "crms": ["Glofox", "Mindbody", "TeamUp", "ClubRight"],
+        "primary_hook": "Membership enquiries answered while staff are on the floor",
+        "fallback_greeting": "Studio Team",
+        "pitch_bullets": [
+            "Calls ring reception and staff mobiles together",
+            "Membership enquiries never lost to voicemail",
+            "Missed calls flagged so new members are called back",
+            "Wi-Fi and phones from one supplier",
+        ],
+        "default_cta": "Let me know how many sites and staff take calls, and I'll send an indicative quote.",
+    },
+    "Hair & Beauty Salons": {
+        "sic_codes": ["96020"],
+        "description": "Hairdressers, barbers & beauty salons",
+        "search_hint": "Salon",
+        "crms": ["Phorest", "Fresha", "Timely", "Treatwell"],
+        "primary_hook": "Bookings answered while you're with clients",
+        "fallback_greeting": "Salon Team",
+        "pitch_bullets": [
+            "Calls ring reception and the salon mobile together",
+            "Callers hear a message and queue instead of ringing out",
+            "Missed booking calls flagged so you can call back",
+            "Card-payment-ready broadband and Wi-Fi",
+        ],
+        "default_cta": "Let me know how many salons and phones you have, and I'll send an indicative quote.",
+    },
+}
+
+MORE_COPY = {
+    "Architects & Surveyors": {
+        "sector_plural": "architects and surveyors",
+        "subject": "Never miss a client call on site, {company}",
+        "pain": "Your team spends much of the week on site or at meetings, clients call the office for updates, and call notes rarely make it into {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many people take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Out on site", "Clients can't reach the architect or surveyor they need."),
+            ("Instructions by phone", "Changes agreed on calls aren't recorded anywhere."),
+            ("Several offices", "Calls don't reach the person who's free."),
+        ],
+        "outcomes": [
+            ("Mobile app on the business number", "Take and make office calls from site."),
+            ("Call recording", "Instructions and variations recorded for reference."),
+            ("Smart routing", "Calls ring the right person, wherever they are."),
+            ("Call logging", "Every call saved against the client or project."),
+        ],
+    },
+    "Physiotherapy & Private Clinics": {
+        "sector_plural": "physiotherapy and private clinics",
+        "subject": "Every booking call answered at {company}",
+        "pain": "Practitioners are with patients most of the day, so calls ring out, new enquiries go elsewhere, and records live in {crms} instead of on screen.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which booking system you use and how many people answer the phone, and I'll send a quote.",
+        "challenges": [
+            ("Calls during treatment", "The phone rings out while everyone is with a patient."),
+            ("Lost new patients", "Enquiries that can't get through book with another clinic."),
+            ("Typing notes after calls", "Call details are added to the record by hand."),
+        ],
+        "outcomes": [
+            ("Patient screen-pop", "The record appears as the phone rings."),
+            ("Call queueing", "Callers hold briefly instead of ringing out."),
+            ("Missed-call follow-up", "Every missed call flagged so bookings are returned."),
+            ("Calls on any device", "Practitioners use the clinic number on their mobile."),
+        ],
+    },
+    "Funeral Directors": {
+        "sector_plural": "funeral directors",
+        "subject": "Every family's call answered, day and night, at {company}",
+        "pain": "Families call at any hour, the on-call director is often out, and a missed call at the worst moment is hard to recover from.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many branches and directors take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Out-of-hours calls", "Calls need to reach whoever is on call, instantly."),
+            ("Several branches", "Families call one branch while staff are at another."),
+            ("Directors away from the desk", "Arrangements and services take people out of the office."),
+        ],
+        "outcomes": [
+            ("On-call routing", "Calls follow the duty director to their mobile."),
+            ("Overflow answering", "A trained team picks up if nobody can."),
+            ("One number, every branch", "Calls reach whoever is free."),
+            ("Recorded calls", "Arrangements kept on record for peace of mind."),
+        ],
+    },
+    "Nurseries & Childcare": {
+        "sector_plural": "nurseries and childcare providers",
+        "subject": "Parent calls answered at {company}, even at drop-off",
+        "pain": "Staff are in the rooms with the children, the office phone rings out at the busiest times, and new parents who can't get through call the next nursery.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many settings you run, and I'll send a quote.",
+        "challenges": [
+            ("Busy drop-off and pick-up", "Calls ring out when everyone is with the children."),
+            ("Lost enquiries", "New parents who can't get through look elsewhere."),
+            ("Manager away from the office", "Important calls wait until they're back."),
+        ],
+        "outcomes": [
+            ("Ring office and mobile together", "Whoever is free picks up."),
+            ("Call queueing", "Parents hear a message instead of ringing out."),
+            ("Missed-call alerts", "Every missed call flagged for a call back."),
+            ("One number, every setting", "Calls routed to the right nursery."),
+        ],
+    },
+    "Marketing & Creative Agencies": {
+        "sector_plural": "marketing and creative agencies",
+        "subject": "Every client call logged in your CRM, {company}",
+        "pain": "Your team works from the studio, home and client sites, calls rarely make it into {crms}, and clients can't always reach their account manager.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with which CRM you use and how many people are in the team, and I'll send an indicative quote.",
+        "challenges": [
+            ("Hybrid working", "Calls don't follow people between studio, home and clients."),
+            ("Calls missing from the CRM", "New business and client calls aren't logged."),
+            ("Mobile numbers everywhere", "Clients call personal mobiles, and you lose the history."),
+        ],
+        "outcomes": [
+            ("CRM click-to-dial", "Dial from your CRM, with every call logged."),
+            ("Softphone everywhere", "The business number on laptop and mobile."),
+            ("Account routing", "Clients reach their account manager first."),
+            ("Call recording", "Briefs and approvals kept on record."),
+        ],
+    },
+    "Business Consultants": {
+        "sector_plural": "business consultants",
+        "subject": "One professional business number for {company}",
+        "pain": "Consultants spend their days at client sites, clients call mobile numbers that change when people leave, and calls rarely get logged in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many consultants you have, and I'll send a quote.",
+        "challenges": [
+            ("Always at client sites", "Calls reach personal mobiles or nobody at all."),
+            ("Lost history", "Client calls aren't logged anywhere central."),
+            ("No cover", "If someone is busy, the client waits."),
+        ],
+        "outcomes": [
+            ("Business number on any device", "Desk, laptop and mobile, one number."),
+            ("CRM call logging", "Every client call saved automatically."),
+            ("Call routing", "Clients always reach someone."),
+            ("Call recording", "Instructions and coaching on record."),
+        ],
+    },
+    "Cleaning & Facilities Services": {
+        "sector_plural": "cleaning and facilities firms",
+        "subject": "New contract enquiries answered at {company}",
+        "pain": "Supervisors are out on sites, the office is small, and new contract enquiries or client issues often land in a voicemail nobody checks.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many people take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Team out on sites", "Calls go unanswered while supervisors are working."),
+            ("Client issues", "Complaints need answering quickly to keep contracts."),
+            ("Out-of-hours calls", "Urgent calls need to reach whoever is on duty."),
+        ],
+        "outcomes": [
+            ("Mobile app on the business number", "Supervisors answer office calls anywhere."),
+            ("Duty routing", "Out-of-hours calls go to the right person."),
+            ("Missed-call alerts", "Every enquiry flagged for a call back."),
+            ("Call logging", "Calls saved against the client and site."),
+        ],
+    },
+    "Removals & Storage": {
+        "sector_plural": "removals and storage companies",
+        "subject": "Every quote enquiry answered at {company}",
+        "pain": "The team is out on moves and surveys, quote enquiries come in all day, and a missed call usually means a booking with someone else.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many people take bookings, and I'll send an indicative quote.",
+        "challenges": [
+            ("Out on moves", "Calls ring out while the team is on the road."),
+            ("Price shoppers", "Customers ring three firms and book the first to answer."),
+            ("Disputes", "Without recordings, it's your word against theirs."),
+        ],
+        "outcomes": [
+            ("Office and mobiles together", "Whoever is free answers."),
+            ("Missed-call alerts", "Every enquiry flagged for a call back."),
+            ("Call recording", "Quotes and agreements kept on record."),
+            ("Call stats", "See how many enquiries you get, and when."),
+        ],
+    },
+    "Travel Agents": {
+        "sector_plural": "travel agents",
+        "subject": "Customer bookings on screen as they call {company}",
+        "pain": "Customers call about bookings and changes, homeworkers need the same number as the shop, and staff search {crms} while the customer waits.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many consultants you have, and I'll send a quote.",
+        "challenges": [
+            ("Searching while customers wait", "Staff look bookings up on every call."),
+            ("Homeworkers", "Calls don't reach consultants working from home."),
+            ("Busy periods", "Peak seasons bring queues and lost calls."),
+        ],
+        "outcomes": [
+            ("Booking screen-pop", "The customer's booking appears as the phone rings."),
+            ("Homeworker routing", "Everyone on the same number, wherever they work."),
+            ("Call recording", "Bookings and changes kept on record."),
+            ("Queues and callbacks", "Callers wait or get a call back at busy times."),
+        ],
+    },
+    "Pharmacies": {
+        "sector_plural": "independent pharmacies",
+        "subject": "Prescription calls queued, not lost, at {company}",
+        "pain": "The phone rings constantly with prescription and delivery queries while the team is serving at the counter, so calls ring out and patients get frustrated.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many branches and phones you have, and I'll send an indicative quote.",
+        "challenges": [
+            ("Calls at the counter", "Staff can't serve and answer the phone at once."),
+            ("Repeat queries", "The same prescription questions tie up the line."),
+            ("Several branches", "Calls don't reach the branch that can help."),
+        ],
+        "outcomes": [
+            ("Call queueing", "Patients hear a message instead of ringing out."),
+            ("Call options", "Prescription, delivery and GP calls routed separately."),
+            ("Missed-call alerts", "Patients get a call back."),
+            ("One number, every branch", "Calls reach whoever is free."),
+        ],
+    },
+    "Charities & Membership Organisations": {
+        "sector_plural": "charities and membership organisations",
+        "subject": "Lower phone costs and one system for {company}",
+        "pain": "Staff and volunteers work from the office, home and out in the community, helplines need answering, and every pound spent on phone lines matters.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many staff and volunteers take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Rising line costs", "Old phone lines cost more every year."),
+            ("People in different places", "Staff and volunteers can't share one number."),
+            ("Helpline cover", "Calls need routing to whoever is available."),
+        ],
+        "outcomes": [
+            ("Lower monthly costs", "Cloud phones cost less than old lines."),
+            ("One system for everyone", "Desk, laptop or mobile, one number."),
+            ("Helpline routing", "Calls queue and go to whoever's free."),
+            ("CRM call logging", "Calls saved against supporters and members."),
+        ],
+    },
+    "Training & Education Providers": {
+        "sector_plural": "training providers",
+        "subject": "Every course enquiry answered at {company}",
+        "pain": "Trainers are out delivering courses, enquiries come in while nobody's at the desk, and calls rarely get logged in {crms}.",
+        "cta": "Worth a quick 15-minute demo? Or just reply with how many people take enquiries, and I'll send an indicative quote.",
+        "challenges": [
+            ("Trainers out delivering", "Nobody's at the desk when enquiries come in."),
+            ("Lost bookings", "Callers who can't get through book elsewhere."),
+            ("No enquiry figures", "You can't see how many calls you get."),
+        ],
+        "outcomes": [
+            ("Calls on any device", "Trainers answer on the business number anywhere."),
+            ("CRM click-to-dial", "Dial from your CRM, with calls logged."),
+            ("Missed-call alerts", "Every enquiry flagged for a call back."),
+            ("Call stats", "See enquiry volumes at a glance."),
+        ],
+    },
+    "Gyms & Fitness Studios": {
+        "sector_plural": "gyms and fitness studios",
+        "subject": "Membership enquiries answered at {company}",
+        "pain": "Staff are on the gym floor or teaching classes, the phone rings out, and new members who can't get through join somewhere else.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many sites and staff take calls, and I'll send an indicative quote.",
+        "challenges": [
+            ("Staff on the floor", "Nobody's at reception to answer."),
+            ("Lost new members", "Enquiries go to the gym down the road."),
+            ("Patchy Wi-Fi", "Members and staff expect it to just work."),
+        ],
+        "outcomes": [
+            ("Reception and mobiles together", "Whoever is free answers."),
+            ("Missed-call alerts", "Every enquiry flagged for a call back."),
+            ("Call queueing", "Callers hear a message instead of ringing out."),
+            ("Business Wi-Fi", "Reliable Wi-Fi from the same supplier."),
+        ],
+    },
+    "Hair & Beauty Salons": {
+        "sector_plural": "hair and beauty salons",
+        "subject": "Booking calls answered while you're with clients at {company}",
+        "pain": "Everyone is with a client when the phone rings, callers hang up, and a missed booking call is lost income.",
+        "cta": "Worth a quick 15-minute chat? Or just reply with how many salons and phones you have, and I'll send an indicative quote.",
+        "challenges": [
+            ("Hands full", "Nobody can answer mid-appointment."),
+            ("Lost bookings", "Callers book with the next salon instead."),
+            ("Card machines and Wi-Fi", "Payments and bookings depend on a good connection."),
+        ],
+        "outcomes": [
+            ("Reception and mobile together", "Whoever is free answers."),
+            ("Call queueing", "Callers hear a message instead of ringing out."),
+            ("Missed-call alerts", "Every booking call flagged for a call back."),
+            ("Reliable broadband", "Card payments and booking apps that just work."),
+        ],
+    },
+}
+
+MORE_PLACE_RULES = {
+    "Architects & Surveyors": {"types": {"architect"}, "words": ("architect", "architects", "architecture", "design", "surveyor", "surveyors", "surveying", "planning")},
+    "Physiotherapy & Private Clinics": {"types": {"physiotherapist", "chiropractor", "medical_clinic", "health"},
+                                        "words": ("physio", "physiotherapy", "chiropractic", "chiropractor", "osteopath", "osteopathy", "clinic", "podiatry", "sports injury", "therapy")},
+    "Funeral Directors": {"types": {"funeral_home"}, "words": ("funeral", "funerals", "undertaker", "undertakers", "memorial")},
+    "Nurseries & Childcare": {"types": {"preschool", "child_care_agency"}, "words": ("nursery", "nurseries", "childcare", "child care", "pre-school", "preschool", "kids", "little")},
+    "Marketing & Creative Agencies": {"types": {"marketing_agency"}, "words": ("marketing", "creative", "design", "digital", "media", "agency", "studio", "branding", "pr")},
+    "Business Consultants": {"types": {"consultant"}, "words": ("consulting", "consultancy", "consultants", "advisory", "solutions", "partners", "management")},
+    "Cleaning & Facilities Services": {"types": set(), "words": ("cleaning", "cleaners", "clean", "hygiene", "facilities", "janitorial", "window")},
+    "Removals & Storage": {"types": {"moving_company", "storage"}, "words": ("removals", "removal", "storage", "movers", "moving", "relocation")},
+    "Travel Agents": {"types": {"travel_agency"}, "words": ("travel", "holidays", "tours", "cruises", "journeys", "voyages")},
+    "Pharmacies": {"types": {"pharmacy", "drugstore"}, "words": ("pharmacy", "chemist", "chemists", "pharmacies")},
+    "Charities & Membership Organisations": {"types": set(), "words": ("trust", "charity", "foundation", "association", "society", "community", "support")},
+    "Training & Education Providers": {"types": {"school"}, "words": ("training", "academy", "learning", "education", "tutors", "tuition", "courses", "skills")},
+    "Gyms & Fitness Studios": {"types": {"gym", "fitness_center"}, "words": ("gym", "fitness", "studio", "pilates", "yoga", "crossfit", "strength", "boxing")},
+    "Hair & Beauty Salons": {"types": {"hair_salon", "beauty_salon", "barber_shop", "hair_care", "spa"},
+                             "words": ("salon", "hair", "beauty", "barber", "barbers", "nails", "spa", "aesthetics")},
+}
+
+MORE_KEYWORDS = {
+    "Architects & Surveyors": ("architect", "surveyor", "surveying", "planning consult"),
+    "Physiotherapy & Private Clinics": ("physio", "chiropract", "osteopath", "podiatr", "sports injury"),
+    "Funeral Directors": ("funeral", "undertaker"),
+    "Nurseries & Childcare": ("nursery", "childcare", "child care", "pre-school", "preschool"),
+    "Marketing & Creative Agencies": ("marketing", "creative agency", "design agency", "digital agency", "advertising"),
+    "Business Consultants": ("consultancy", "consulting", "management consult"),
+    "Cleaning & Facilities Services": ("cleaning", "cleaners", "facilities management", "hygiene"),
+    "Removals & Storage": ("removals", "removal", "self storage", "storage"),
+    "Travel Agents": ("travel", "holidays", "tour operator"),
+    "Pharmacies": ("pharmacy", "chemist"),
+    "Charities & Membership Organisations": ("charity", "charitable", "foundation", "association"),
+    "Training & Education Providers": ("training", "academy", "tuition", "tutoring"),
+    "Gyms & Fitness Studios": ("gym", "fitness", "pilates", "yoga"),
+    "Hair & Beauty Salons": ("salon", "hair", "beauty", "barber", "aesthetic"),
+}
+for _sector in ("Architects & Surveyors", "Funeral Directors", "Nurseries & Childcare", "Business Consultants",
+                "Cleaning & Facilities Services", "Removals & Storage", "Pharmacies", "Charities & Membership Organisations",
+                "Gyms & Fitness Studios", "Hair & Beauty Salons"):
+    MORE_COPY[_sector]["intro"] = "never miss a call, wherever the team is working."
+    MORE_COPY[_sector]["lead_in"] = "Our cloud phone systems give you:"
+NEW_PRESETS.update(MORE_PRESETS)
+NEW_COPY.update(MORE_COPY)
+NEW_PLACE_RULES.update(MORE_PLACE_RULES)
+NEW_KEYWORDS.update(MORE_KEYWORDS)
+
 VERTICAL_PRESETS.update(NEW_PRESETS)
 SECTOR_PLACE_RULES.update(NEW_PLACE_RULES)
 SECTOR_COPY.update(NEW_COPY)
@@ -2733,9 +3233,10 @@ def build_email_pitch(
 
     parts = [
         f"Hi {greeting_name},",
-        f"{who}. We help {copy['sector_plural']} like {company} connect their phones to the software they already use.",
+        f"{who}. We help {copy['sector_plural']} like {company} "
+        + copy.get("intro", "connect their phones to the software they already use."),
         copy["pain"].format(crms=crms_str),
-        "We connect your phones to whichever system you use, so you get:",
+        copy.get("lead_in", "We connect your phones to whichever system you use, so you get:"),
         bullets,
     ]
     if include_switchover:
@@ -3924,6 +4425,14 @@ def zoho_lead_fields(item: Dict[str, Any], cn: str) -> Dict[str, Any]:
     return fields
 
 
+def zoho_worthy(cn: str) -> bool:
+    """Firms go into Zoho only once there's an email to use, unless 'Also add firms with no email' is on."""
+    item = st.session_state.get("queue", {}).get(cn) or {}
+    if st.session_state.get("zoho_no_email", False):
+        return True
+    return bool((item.get("to") or "").strip() or (item.get("lead") and item["lead"].emails_found))
+
+
 def push_to_zoho_leads(cns: List[str]) -> Dict[str, List[str]]:
     """Adds each firm to Zoho as a Lead unless it's already there (as a lead or a customer)."""
     queue = st.session_state.get("queue", {})
@@ -4481,9 +4990,12 @@ def rescan_for_emails(cns: List[str]) -> Tuple[int, int, int]:
     progress.empty()
 
     updated = 0
+    already = set(get_zoho_store()) if found and zoho_on() else set()
+    if found and zoho_on() and st.session_state.get("zoho_auto", True):  # Now they have an email, they belong in Zoho
+        push_to_zoho_leads([c for c in found if c not in already])
     if found and zoho_on():  # Leads this app created had no email: add it, so Lead Revival and MY PA can use it too
         store = get_zoho_store()
-        for c in found:
+        for c in [c for c in found if c in already]:
             rec = store.get(c) or {}
             if rec.get("status") == "created" and rec.get("id") and queue[c]["to"]:
                 try:
@@ -4543,9 +5055,13 @@ def run_enrichment(
         st.session_state["current_cn_select"] = first_cn
     st.session_state["stat_dossiers"] += len(results)
     if results and zoho_on() and st.session_state.get("zoho_auto", True):
-        summary = push_to_zoho_leads(list(results))
-        if zoho_summary_text(summary):
-            st.info(zoho_summary_text(summary))
+        worthy = [c for c in results if zoho_worthy(c)]
+        held = len(results) - len(worthy)
+        summary = push_to_zoho_leads(worthy)
+        if zoho_summary_text(summary) or held:
+            st.info((zoho_summary_text(summary) or "Zoho: nothing new to add.")
+                    + (f" {held} {'firm' if held == 1 else 'firms'} with no email kept out of Zoho;"
+                       " they're under No email found, and go into Zoho if an email turns up." if held else ""))
         if "permission" in summary["error"]:
             st.warning("Zoho: the key in Secrets doesn't have all the permissions this app needs, so no firms were added."
                        " Open **Reconnect Zoho** in the sidebar to get this app its own key, then use **Add firms not yet in Zoho**"
@@ -4671,7 +5187,13 @@ with st.sidebar:
     elif zoho_on():
         st.session_state["zoho_auto"] = st.toggle(
             "Add enriched firms to Zoho", value=st.session_state.get("zoho_auto", True), key="w_zoho_auto",
-            help="Every enriched firm becomes a Zoho Lead (checked for duplicates and existing customers first).")
+            help="Enriched firms with an email become Zoho Leads (checked for duplicates and existing customers first).")
+        if st.session_state["zoho_auto"]:
+            st.session_state["zoho_no_email"] = st.toggle(
+                "Also add firms with no email", value=st.session_state.get("zoho_no_email", False), key="w_zoho_no_email",
+                help="Off (recommended): firms without a findable email stay in this app's No email found list and"
+                     " the call list, and only go into Zoho once an email turns up, which keeps Zoho free of leads"
+                     " the other apps can't use. On: every enriched firm goes into Zoho, as before.")
         if not lead_source_ok():
             st.caption(f"⚠️ Add **{zoho_lead_source()}** as a Lead Source option in Zoho (Setup → Modules → Leads →"
                        " Lead Source). Until then, new leads are created without a Lead Source.")
@@ -5852,7 +6374,8 @@ def render_zoho_send_panel(ready_sel: List[str], log_now: Dict[str, Any]) -> Non
             " logs it on the firm's Zoho lead, adds a note and sets the status to Attempted to Contact.</div>")
         show_zoho_push_result("panel")
         store = get_zoho_store()
-        missing = [c for c in st.session_state.get("queue_order", []) if c in st.session_state.get("queue", {}) and c not in store]
+        missing = [c for c in st.session_state.get("queue_order", []) if c in st.session_state.get("queue", {})
+                   and c not in store and zoho_worthy(c)]
         if missing and st.button(f"➕  Add {len(missing)} firm(s) not yet in Zoho", key="zoho_add_missing"):
             s_ = push_to_zoho_leads(missing)
             st.session_state["zoho_add_msg"] = (
