@@ -419,6 +419,20 @@ def initials(name: str) -> str:
 # ==========================================
 
 
+def quick_add_logins() -> List[Tuple[str, str]]:
+    """Quick add passwords from Secrets: QUICK_ADD_PASSWORD (shared), and/or [QUICK_ADD_USERS] name = "password"."""
+    out: List[Tuple[str, str]] = []
+    try:
+        shared = st.secrets.get("QUICK_ADD_PASSWORD")
+        if shared:
+            out.append(("", str(shared)))
+        users = st.secrets.get("QUICK_ADD_USERS") or {}
+        out += [(str(k), str(v)) for k, v in dict(users).items() if v]
+    except Exception:
+        pass
+    return out
+
+
 def check_password() -> bool:
     # Fail CLOSED: if the secret is missing or misconfigured, nobody gets in.
     try:
@@ -437,11 +451,18 @@ def check_password() -> bool:
         return False
 
     def password_entered():
-        if hmac.compare_digest(
-            st.session_state.get("password", "").encode("utf-8"),
-            str(configured_password).encode("utf-8"),
-        ):
+        typed = st.session_state.get("password", "").encode("utf-8")
+        role, who = None, ""
+        if hmac.compare_digest(typed, str(configured_password).encode("utf-8")):
+            role = "full"
+        else:  # Telemarketers: their own password opens Quick add only
+            for name, pw in quick_add_logins():
+                if pw and hmac.compare_digest(typed, pw.encode("utf-8")):
+                    role, who = "quick", name
+                    break
+        if role:
             st.session_state["password_correct"] = True
+            st.session_state["role"], st.session_state["quick_user"] = role, who
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
@@ -4393,10 +4414,12 @@ def zoho_lead_fields(item: Dict[str, Any], cn: str) -> Dict[str, Any]:
         fields["Website"] = lead.website_url
     fields.update(_split_address(lead.registered_address or ""))
     industries = ZOHO.picklist(lf, "Industry")
-    match = next((v for v in industries if v.lower() == item["vertical"].lower()), None)
+    match = next((v for v in industries if v.lower() == (item.get("base_vertical") or item["vertical"]).lower()), None)
     if match:
         fields["Industry"] = match
-    if lead_source_ok():
+    if item.get("lead_source") and item["lead_source"] in ZOHO.picklist(lf, "Lead_Source"):
+        fields["Lead_Source"] = item["lead_source"]
+    elif lead_source_ok():
         fields["Lead_Source"] = zoho_lead_source()
     statuses = ZOHO.picklist(lf, "Lead_Status")
     emailed = cn in get_sent_log()
@@ -4420,7 +4443,12 @@ def zoho_lead_fields(item: Dict[str, Any], cn: str) -> Dict[str, Any]:
         desc.append("Other numbers: " + ", ".join(lead.phones_found[1:4]))
     if getattr(lead, "linkedin_url", None):
         desc.append(f"LinkedIn: {lead.linkedin_url}")
-    desc.append("Details from Companies House, the firm's own website and Google Maps.")
+    if item.get("lead_source"):  # Quick add: the telemarketer's own data
+        desc = [f"Added by {item.get('added_by') or 'a telemarketer'} with Prospect Engine Quick add on"
+                f" {now_uk().strftime('%d %b %Y')} (source: {item['lead_source']}).",
+                f"Sector pitched: {item['vertical']}"]
+    else:
+        desc.append("Details from Companies House, the firm's own website and Google Maps.")
     fields["Description"] = "\n".join(desc)
     return fields
 
@@ -4925,10 +4953,10 @@ def sent_record(item: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def add_to_queue(lead: ScrapedLead, vertical: str) -> None:
+def add_to_queue(lead: ScrapedLead, vertical: str, cn: Optional[str] = None) -> None:
     queue = st.session_state.setdefault("queue", {})
     order = st.session_state.setdefault("queue_order", [])
-    cn = lead.company_number or lead.company_name
+    cn = cn or lead.company_number or lead.company_name
     contact, _ = infer_contact_name_and_role(lead, vertical)
     queue[cn] = {
         "lead": lead,
@@ -5109,6 +5137,23 @@ def columns(spec, **kwargs):
         return st.columns(spec, **kwargs)
 
 
+QUICK_MODE = st.session_state.get("role") == "quick"
+QUICK_SOURCE = _secret_value("QUICK_ADD_LEAD_SOURCE", "Telemarketing")
+
+
+def register_vertical(base: str, crm: str) -> str:
+    """A sector pitch that names the firm's own system, e.g. 'Dental Practices · Dentally'. Kept for the session."""
+    key = f"{base} · {crm}"
+    st.session_state.setdefault("custom_verticals", {})[key] = (base, crm)
+    VERTICAL_PRESETS[key] = {**VERTICAL_PRESETS[base], "crms": [crm], "primary_hook": f"{crm} integration"}
+    SECTOR_COPY[key] = SECTOR_COPY[base]
+    return key
+
+
+for _vk, (_vbase, _vcrm) in list(st.session_state.get("custom_verticals", {}).items()):
+    if _vbase in VERTICAL_PRESETS:
+        register_vertical(_vbase, _vcrm)
+
 # ---------------- Sidebar ----------------
 with st.sidebar:
     render_html(
@@ -5116,101 +5161,113 @@ with st.sidebar:
         f'<div><div class="n">{APP_NAME}</div><div class="s">{APP_TAGLINE}</div></div></div>'
     )
     # ---- Workspace switch (bookmarkable: ?view=calls) ----
-    if "view" not in st.session_state:
-        st.session_state["view"] = st.query_params.get("view") if st.query_params.get("view") in ("calls", "activity") else "prospect"
-    _n_to_call = len(call_queue(get_call_list()))
-    _views = {"prospect": "🎯  Prospecting", "calls": "📞  Call list", "activity": "📊  Activity"}
-    if st.session_state["view"] not in _views:
-        st.session_state["view"] = "prospect"
-    st.session_state["view"] = st.radio(
-        "Workspace", list(_views), key="w_view", label_visibility="collapsed",
-        index=list(_views).index(st.session_state["view"]), format_func=_views.get,
-    )  # Labels stay fixed: a changing label would make Streamlit reset the switch
-    if _n_to_call:
-        render_html(f'<div style="font-size:.76rem;color:var(--muted);margin:-2px 0 6px 4px">'
-                    f'{_n_to_call} {"firm" if _n_to_call == 1 else "firms"} waiting on the call list</div>')
-    if st.query_params.get("view", "prospect") != st.session_state["view"]:
-        st.query_params["view"] = st.session_state["view"]
-    render_html('<div class="pe-side-h">Connections</div>')
-    if secret_ch_key:
-        # Key stays server-side: never placed in a widget, so never sent to the browser.
+    if QUICK_MODE:  # Telemarketer login: Quick add only
+        st.session_state["view"] = "quick"
+    else:
+        if "view" not in st.session_state:
+            st.session_state["view"] = st.query_params.get("view") if st.query_params.get("view") in ("calls", "activity", "quick") else "prospect"
+        _n_to_call = len(call_queue(get_call_list()))
+        _views = {"prospect": "🎯  Prospecting", "quick": "➕  Quick add", "calls": "📞  Call list", "activity": "📊  Activity"}
+        if st.session_state["view"] not in _views:
+            st.session_state["view"] = "prospect"
+        st.session_state["view"] = st.radio(
+            "Workspace", list(_views), key="w_view", label_visibility="collapsed",
+            index=list(_views).index(st.session_state["view"]), format_func=_views.get,
+        )  # Labels stay fixed: a changing label would make Streamlit reset the switch
+        if _n_to_call:
+            render_html(f'<div style="font-size:.76rem;color:var(--muted);margin:-2px 0 6px 4px">'
+                        f'{_n_to_call} {"firm" if _n_to_call == 1 else "firms"} waiting on the call list</div>')
+        if st.query_params.get("view", "prospect") != st.session_state["view"]:
+            st.query_params["view"] = st.session_state["view"]
+    if QUICK_MODE:  # Just what a telemarketer needs: Zoho sign-in, no settings
         ch_api_key = secret_ch_key
+        zoho_err = load_zoho_meta() if ZOHO.configured else None
+        st.session_state["zoho_auto"], st.session_state["zoho_no_email"] = True, False
+        render_html(f'<div class="pe-status">Zoho CRM<span class="st {"ok" if zoho_on() and not zoho_err else "off"}">'
+                    f'{"Connected" if zoho_on() and not zoho_err else "Not connected"}</span></div>')
+        if zoho_err or not zoho_on():
+            st.caption("⚠️ Zoho isn't connected, so leads can't be added or sent. Let Sam know.")
     else:
-        ch_api_key = st.text_input(
-            "Companies House API key",
-            type="password",
-            help=(
-                "Not found in Secrets. Paste a key for this session, or add"
-                " COMPANIES_HOUSE_KEY to Streamlit Secrets."
-            ),
+        render_html('<div class="pe-side-h">Connections</div>')
+        if secret_ch_key:
+            # Key stays server-side: never placed in a widget, so never sent to the browser.
+            ch_api_key = secret_ch_key
+        else:
+            ch_api_key = st.text_input(
+                "Companies House API key",
+                type="password",
+                help=(
+                    "Not found in Secrets. Paste a key for this session, or add"
+                    " COMPANIES_HOUSE_KEY to Streamlit Secrets."
+                ),
+            )
+        ch_state = ('ok">Connected' if secret_ch_key else ('idle">Session key' if ch_api_key else 'off">No key'))
+        render_html(
+            f'<div class="pe-status">Companies House<span class="st {ch_state}</span></div>'
+            '<div class="pe-status">Web discovery<span class="st ok">Ready</span></div>'
+            '<div class="pe-status">PDF dossiers<span class="st ok">Ready</span></div>'
         )
-    ch_state = ('ok">Connected' if secret_ch_key else ('idle">Session key' if ch_api_key else 'off">No key'))
-    render_html(
-        f'<div class="pe-status">Companies House<span class="st {ch_state}</span></div>'
-        '<div class="pe-status">Web discovery<span class="st ok">Ready</span></div>'
-        '<div class="pe-status">PDF dossiers<span class="st ok">Ready</span></div>'
-    )
-    get_sent_log()
-    if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
-        log_state = 'off">Error'
-    elif SENT_LOG.backend == "github":
-        log_state = 'ok">Saved to GitHub'
-    else:
-        log_state = 'idle">Temporary'
-    render_html(f'<div class="pe-status">Sent log<span class="st {log_state}</span></div>')
-    call_state = ('off">Error' if CALL_STORE.last_error else 'ok">Saved to GitHub' if CALL_STORE.backend == "github" else 'idle">Temporary')
-    render_html(f'<div class="pe-status">Call list<span class="st {call_state}</span></div>')
-    places_state = 'ok">Connected' if _secret_value("GOOGLE_PLACES_API_KEY") else 'idle">Not set up'
-    render_html(f'<div class="pe-status">Google Maps lookup<span class="st {places_state}</span></div>')
-    fca_state = 'ok">Connected' if _secret_value("FCA_API_KEY") and _secret_value("FCA_API_EMAIL") else 'idle">Add free key'
-    sra_state = 'ok">Connected' if _secret_value("SRA_API_KEY") else 'idle">Add free key'
-    render_html(
-        '<div class="pe-status">OpenStreetMap<span class="st ok">Free · ready</span></div>'
-        '<div class="pe-status">Email domain checks<span class="st ok">Free · ready</span></div>'
-        '<div class="pe-status">Owners (Companies House)<span class="st ok">Free · ready</span></div>'
-        f'<div class="pe-status">FCA register<span class="st {fca_state}</span></div>'
-        f'<div class="pe-status">SRA register<span class="st {sra_state}</span></div>'
-    )
-    zoho_err = load_zoho_meta() if ZOHO.configured else None
-    zoho_state = ('idle">Setup needed' if ZOHO.can_setup or (zoho_err and "invalid_code" in zoho_err)
-                  else 'off">Error' if zoho_err else 'ok">Connected' if zoho_on() else 'idle">Not set up')
-    render_html(f'<div class="pe-status">Zoho CRM<span class="st {zoho_state}</span></div>')
-    needs_key = ZOHO.can_setup or st.session_state.get("zoho_needs_scope") or (
-        zoho_err and ("invalid_code" in zoho_err or "permission" in zoho_err.lower()))
-    if needs_key and not ZOHO.can_setup:
-        st.caption("⚠️ The Zoho key in Secrets is from another app and is missing permissions. Get this app its own key below.")
-    if ZOHO.client_id and ZOHO.client_secret:
-        with st.expander("Connect Zoho" if needs_key else "Reconnect Zoho (new key)", expanded=bool(needs_key)):
-            render_zoho_setup()
-    if zoho_err and not needs_key:
-        st.caption("⚠️ " + zoho_err)
-    elif zoho_on():
-        st.session_state["zoho_auto"] = st.toggle(
-            "Add enriched firms to Zoho", value=st.session_state.get("zoho_auto", True), key="w_zoho_auto",
-            help="Enriched firms with an email become Zoho Leads (checked for duplicates and existing customers first).")
-        if st.session_state["zoho_auto"]:
-            st.session_state["zoho_no_email"] = st.toggle(
-                "Also add firms with no email", value=st.session_state.get("zoho_no_email", False), key="w_zoho_no_email",
-                help="Off (recommended): firms without a findable email stay in this app's No email found list and"
-                     " the call list, and only go into Zoho once an email turns up, which keeps Zoho free of leads"
-                     " the other apps can't use. On: every enriched firm goes into Zoho, as before.")
-        if not lead_source_ok():
-            st.caption(f"⚠️ Add **{zoho_lead_source()}** as a Lead Source option in Zoho (Setup → Modules → Leads →"
-                       " Lead Source). Until then, new leads are created without a Lead Source.")
-    if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
-        st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
-    elif SENT_LOG.backend == "local":
-        st.caption("Sent ticks reset when the app restarts. Add GITHUB_TOKEN & GITHUB_REPO to Secrets to keep them permanently.")
-    if st.button("↻ Refresh shared data", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
-        st.session_state.pop("sent_log_data", None)
-        st.session_state.pop("call_list_data", None)
-        st.session_state.pop("contacts_data", None)
-        for _k in ("zoho_store_data", "zoho_from", "pe_lead_fields"):
-            st.session_state.pop(_k, None)
-        st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
-        st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
-        bump_queue_editor()
-        st.rerun()
+        get_sent_log()
+        if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
+            log_state = 'off">Error'
+        elif SENT_LOG.backend == "github":
+            log_state = 'ok">Saved to GitHub'
+        else:
+            log_state = 'idle">Temporary'
+        render_html(f'<div class="pe-status">Sent log<span class="st {log_state}</span></div>')
+        call_state = ('off">Error' if CALL_STORE.last_error else 'ok">Saved to GitHub' if CALL_STORE.backend == "github" else 'idle">Temporary')
+        render_html(f'<div class="pe-status">Call list<span class="st {call_state}</span></div>')
+        places_state = 'ok">Connected' if _secret_value("GOOGLE_PLACES_API_KEY") else 'idle">Not set up'
+        render_html(f'<div class="pe-status">Google Maps lookup<span class="st {places_state}</span></div>')
+        fca_state = 'ok">Connected' if _secret_value("FCA_API_KEY") and _secret_value("FCA_API_EMAIL") else 'idle">Add free key'
+        sra_state = 'ok">Connected' if _secret_value("SRA_API_KEY") else 'idle">Add free key'
+        render_html(
+            '<div class="pe-status">OpenStreetMap<span class="st ok">Free · ready</span></div>'
+            '<div class="pe-status">Email domain checks<span class="st ok">Free · ready</span></div>'
+            '<div class="pe-status">Owners (Companies House)<span class="st ok">Free · ready</span></div>'
+            f'<div class="pe-status">FCA register<span class="st {fca_state}</span></div>'
+            f'<div class="pe-status">SRA register<span class="st {sra_state}</span></div>'
+        )
+        zoho_err = load_zoho_meta() if ZOHO.configured else None
+        zoho_state = ('idle">Setup needed' if ZOHO.can_setup or (zoho_err and "invalid_code" in zoho_err)
+                      else 'off">Error' if zoho_err else 'ok">Connected' if zoho_on() else 'idle">Not set up')
+        render_html(f'<div class="pe-status">Zoho CRM<span class="st {zoho_state}</span></div>')
+        needs_key = ZOHO.can_setup or st.session_state.get("zoho_needs_scope") or (
+            zoho_err and ("invalid_code" in zoho_err or "permission" in zoho_err.lower()))
+        if needs_key and not ZOHO.can_setup:
+            st.caption("⚠️ The Zoho key in Secrets is from another app and is missing permissions. Get this app its own key below.")
+        if ZOHO.client_id and ZOHO.client_secret:
+            with st.expander("Connect Zoho" if needs_key else "Reconnect Zoho (new key)", expanded=bool(needs_key)):
+                render_zoho_setup()
+        if zoho_err and not needs_key:
+            st.caption("⚠️ " + zoho_err)
+        elif zoho_on():
+            st.session_state["zoho_auto"] = st.toggle(
+                "Add enriched firms to Zoho", value=st.session_state.get("zoho_auto", True), key="w_zoho_auto",
+                help="Enriched firms with an email become Zoho Leads (checked for duplicates and existing customers first).")
+            if st.session_state["zoho_auto"]:
+                st.session_state["zoho_no_email"] = st.toggle(
+                    "Also add firms with no email", value=st.session_state.get("zoho_no_email", False), key="w_zoho_no_email",
+                    help="Off (recommended): firms without a findable email stay in this app's No email found list and"
+                         " the call list, and only go into Zoho once an email turns up, which keeps Zoho free of leads"
+                         " the other apps can't use. On: every enriched firm goes into Zoho, as before.")
+            if not lead_source_ok():
+                st.caption(f"⚠️ Add **{zoho_lead_source()}** as a Lead Source option in Zoho (Setup → Modules → Leads →"
+                           " Lead Source). Until then, new leads are created without a Lead Source.")
+        if SENT_LOG.last_error or st.session_state.get("sent_log_error"):
+            st.caption("⚠️ " + (st.session_state.pop("sent_log_error", None) or SENT_LOG.last_error or ""))
+        elif SENT_LOG.backend == "local":
+            st.caption("Sent ticks reset when the app restarts. Add GITHUB_TOKEN & GITHUB_REPO to Secrets to keep them permanently.")
+        if st.button("↻ Refresh shared data", **FULL_WIDTH, help="Pick up ticks made by colleagues since you opened the app."):
+            st.session_state.pop("sent_log_data", None)
+            st.session_state.pop("call_list_data", None)
+            st.session_state.pop("contacts_data", None)
+            for _k in ("zoho_store_data", "zoho_from", "pe_lead_fields"):
+                st.session_state.pop(_k, None)
+            st.session_state["call_ver"] = st.session_state.get("call_ver", 0) + 1
+            st.session_state["sent_log_ver"] = st.session_state.get("sent_log_ver", 0) + 1
+            bump_queue_editor()
+            st.rerun()
     render_html('<div class="pe-side-h">This session</div>')
     sidebar_stats_slot = st.empty()
     render_html('<div class="pe-side-h">Your email signature</div>')
@@ -5221,7 +5278,7 @@ with st.sidebar:
             except Exception:
                 return default
         prof = st.session_state.setdefault("sender_profile", {
-            "name": _secret("SENDER_NAME", ""),
+            "name": st.session_state.get("quick_user") or _secret("SENDER_NAME", ""),
             "title": _secret("SENDER_TITLE", SENDER_DEFAULTS["title"]),
             "phone": _secret("SENDER_PHONE", SENDER_DEFAULTS["phone"]),
             "email": _secret("SENDER_EMAIL", SENDER_DEFAULTS["email"]),
@@ -5237,6 +5294,8 @@ with st.sidebar:
     render_html('<div class="pe-side-h">Account</div>')
     if st.button("Log out", **FULL_WIDTH):
         st.session_state["password_correct"] = False
+        for _k in ("role", "quick_user", "view"):
+            st.session_state.pop(_k, None)
         st.rerun()
 
 # ---------------- CALL LIST PAGE ----------------
@@ -5793,165 +5852,349 @@ if st.session_state.get("view") == "calls":
 
 
 
+# ---------------- QUICK ADD (telemarketers' own data) ----------------
+QUICK_FREE_MAIL = {"gmail.com", "googlemail.com", "hotmail.com", "hotmail.co.uk", "outlook.com", "live.co.uk",
+                   "live.com", "yahoo.com", "yahoo.co.uk", "btinternet.com", "btconnect.com", "icloud.com", "me.com",
+                   "aol.com", "sky.com", "virginmedia.com", "talktalk.net"}
+QUICK_AUTO, QUICK_OTHER = "Automatic", "Other (type it in)"
+QUICK_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,24}$")
+QUICK_COLUMNS = {  # CSV headings we recognise (any case)
+    "sector": ("sector", "industry", "industry sector", "vertical", "type"),
+    "name": ("name", "contact", "contact name", "full name", "first name"),
+    "email": ("email", "email address", "e-mail"),
+    "company": ("company", "company name", "business", "business name", "firm", "organisation", "organization"),
+    "phone": ("phone", "telephone", "tel", "phone number", "mobile"),
+    "crm": ("crm", "system", "software", "crm / system"),
+}
+
+
+def quick_hero_html() -> str:
+    return (
+        '<div class="pe-hero"><div>'
+        '<div class="pe-eyebrow"><span class="dot"></span>Your own leads · logged in Zoho</div>'
+        '<div class="pe-title">Quick <span>add &amp; send</span></div>'
+        '<div class="pe-sub">Add a lead (or upload your list), and it goes into Zoho with a tailored email and'
+        ' one-page PDF, ready to send from Zoho in one click. Opens and clicks are tracked.</div></div>'
+        '<div class="pe-stepper"><div class="pe-step active"><span class="num">1</span>Add</div>'
+        '<div class="pe-step-sep"></div><div class="pe-step"><span class="num">2</span>Check</div>'
+        '<div class="pe-step-sep"></div><div class="pe-step"><span class="num">3</span>Send</div></div></div>'
+    )
+
+
+def _company_from_email(email: str) -> str:
+    dom = email.split("@")[-1].lower() if "@" in email else ""
+    if not dom or dom in QUICK_FREE_MAIL:
+        return ""
+    return " ".join(w.capitalize() for w in re.split(r"[-_]", dom.split(".")[0]) if w)
+
+
+def match_sector(text: str) -> Optional[str]:
+    """'dentist', 'Dental Practices' or 'solicitors' -> the sector pitch name."""
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+    for k in VERTICAL_PRESETS:
+        if " · " not in k and k.lower() == t:
+            return k
+    for k, rules in SECTOR_PLACE_RULES.items():
+        if k in VERTICAL_PRESETS and (t in k.lower() or any(w in t for w in rules.get("words", ()) if len(w) >= 4)):
+            return k
+    return None
+
+
+def quick_add(rows: List[Dict[str, str]], default_sector: Optional[str]) -> Tuple[List[str], List[str]]:
+    """Adds each row to the review queue (and Zoho). Returns (keys added, problems)."""
+    added, problems = [], []
+    who = get_sender().get("name") or st.session_state.get("quick_user") or ""
+    queue = st.session_state.setdefault("queue", {})
+    for i, r in enumerate(rows, start=1):
+        email = (r.get("email") or "").strip().lower()
+        label = r.get("company") or email or f"Row {i}"
+        if not QUICK_EMAIL_RE.match(email):
+            problems.append(f"{label}: the email address doesn't look right")
+            continue
+        sector = match_sector(r.get("sector", "")) or default_sector
+        if not sector:
+            problems.append(f"{label}: no sector (pick a default sector for the list)")
+            continue
+        company = (r.get("company") or "").strip() or _company_from_email(email)
+        if not company:
+            problems.append(f"{label}: add the company name (it's a personal email address)")
+            continue
+        crm = (r.get("crm") or "").strip()
+        vertical = register_vertical(sector, crm) if crm and crm.lower() not in ("automatic", "auto", "unknown") else sector
+        cn = "qa:" + email
+        lead = ScrapedLead(company_name=company, trading_name=company, emails_found=[email], contact_email=email,
+                           contact_name=(r.get("name") or "").strip() or None, sector_guess=sector,
+                           phones_found=[p for p in [normalise_uk_phone(r.get("phone") or "") or (r.get("phone") or "").strip()] if p])
+        add_to_queue(lead, vertical, cn=cn)
+        queue[cn].update({"base_vertical": sector, "lead_source": QUICK_SOURCE, "added_by": who})
+        added.append(cn)
+    if added:
+        st.session_state["current_cn"] = st.session_state["current_cn_select"] = added[-1]
+    if added and zoho_on():
+        summary = push_to_zoho_leads(added)
+        st.session_state["quick_zoho_msg"] = zoho_summary_text(summary)
+        if summary["error"]:
+            problems += ["Zoho: " + e for e in summary["error"][:5]]
+    return added, problems
+
+
+def render_quick_add() -> None:
+    with st.container(key="card-left"):
+        section_header("01", "Add your leads", "One at a time, or upload your list. Each goes into Zoho, checked"
+                       " for duplicates and existing customers first.")
+        if zoho_on() and QUICK_SOURCE not in ZOHO.picklist(st.session_state.get("pe_lead_fields") or {}, "Lead_Source"):
+            st.caption(f"ℹ️ Add **{QUICK_SOURCE}** as a Lead Source option in Zoho (Setup → Modules → Leads → Lead"
+                       " Source) to label these leads. Until then they use the usual Prospect Engine source.")
+        tab1, tab2 = st.tabs(["➕  One lead", "📄  Upload a list (CSV)"])
+        sectors = sorted([k for k in VERTICAL_PRESETS if " · " not in k], key=str.lower)
+        v = st.session_state.get("qa_ver", 0)
+        with tab1:
+            c1, c2 = st.columns(2)
+            with c1:
+                sector = st.selectbox("Industry sector", sectors, index=None, placeholder="Pick a sector", key=f"qa_sector_{v}")
+                name = st.text_input("Contact name", key=f"qa_name_{v}", placeholder="e.g. Sarah Jones")
+                phone = st.text_input("Phone (optional)", key=f"qa_phone_{v}", placeholder="e.g. 01743 123456")
+            with c2:
+                email = st.text_input("Email", key=f"qa_email_{v}", placeholder="e.g. sarah@smithlaw.co.uk").strip()
+                company = st.text_input("Company name", key=f"qa_company_{v}",
+                                        placeholder=_company_from_email(email) or "e.g. Smith Law",
+                                        help="Left blank, it's taken from the email address.")
+                crm = ""
+                if sector:
+                    typical = VERTICAL_PRESETS[sector]["crms"]
+                    pick = st.selectbox("Their CRM / system", [QUICK_AUTO] + typical + [QUICK_OTHER], key=f"qa_crm_{v}",
+                                        format_func=lambda x: f"Automatic: {', '.join(typical[:3])}" if x == QUICK_AUTO else x,
+                                        help="Automatic names the systems most firms in this sector use. If you know"
+                                             " theirs, pick or type it and the email and PDF talk about that one.")
+                    if pick == QUICK_OTHER:
+                        crm = st.text_input("System name", key=f"qa_crm_other_{v}", placeholder="e.g. Practice Evolve").strip()
+                    elif pick != QUICK_AUTO:
+                        crm = pick
+            if st.button("➕  Add this lead", type="primary", key="qa_add", **FULL_WIDTH,
+                         disabled=not (sector and email)):
+                added, problems = quick_add([{"sector": sector or "", "name": name, "email": email, "company": company,
+                                              "phone": phone, "crm": crm}], sector)
+                st.session_state["qa_msg"] = (added, problems)
+                if added:
+                    st.session_state["qa_ver"] = v + 1  # Fresh, empty form for the next lead
+                st.rerun()
+        with tab2:
+            st.caption("A CSV with a row per lead. Headings it understands: Sector, Name, Email, Company, Phone, CRM."
+                       " Only Email is required; rows without a sector use the default below.")
+            tmpl = "Sector,Name,Email,Company,Phone,CRM\nDental Practices,Sarah Jones,sarah@example.co.uk,Example Dental,01743 123456,\n"
+            st.download_button("⬇  Template (.csv)", data=tmpl.encode("utf-8"), file_name="quick_add_template.csv",
+                               mime="text/csv")
+            up = st.file_uploader("Your list", type=["csv"], key=f"qa_file_{v}")
+            default_sector = st.selectbox("Default sector (for rows without one)", sectors, index=None,
+                                          placeholder="Pick a sector", key=f"qa_default_{v}")
+            rows: List[Dict[str, str]] = []
+            if up is not None:
+                try:
+                    df = pd.read_csv(up, dtype=str, keep_default_na=False, encoding_errors="replace")
+                except Exception as exc:
+                    st.error(f"Couldn't read that file ({exc.__class__.__name__}). Save it from Excel as CSV and try again.")
+                    df = pd.DataFrame()
+                cols = {c: next((k for k, names in QUICK_COLUMNS.items() if c.strip().lower() in names), None) for c in df.columns}
+                if not df.empty and "email" not in cols.values():
+                    st.error("No Email column found. Name one column Email.")
+                else:
+                    for _, row in df.iterrows():
+                        rec = {k: "" for k in QUICK_COLUMNS}
+                        for c, k in cols.items():
+                            if k and not rec[k]:
+                                rec[k] = str(row[c]).strip()
+                        if rec["email"]:
+                            rows.append(rec)
+                    st.caption(f"{len(rows):,} {'lead' if len(rows) == 1 else 'leads'} with an email in this file.")
+            if st.button(f"➕  Add {len(rows):,} leads" if rows else "➕  Add the list", type="primary", key="qa_add_csv",
+                         disabled=not rows, **FULL_WIDTH):
+                added, problems = quick_add(rows, default_sector)
+                st.session_state["qa_msg"] = (added, problems)
+                if added:
+                    st.session_state["qa_ver"] = v + 1
+                st.rerun()
+        msg = st.session_state.pop("qa_msg", None)
+        if msg:
+            added, problems = msg
+            log_now = get_sent_log()
+            again = [c for c in added if c in log_now]
+            if added:
+                st.success(f"Added {len(added)} {'lead' if len(added) == 1 else 'leads'}. Check the email below, then"
+                           " send from Zoho." + (f" {st.session_state.pop('quick_zoho_msg', '') or ''}"))
+            if again:
+                st.warning(f"{len(again)} of these {'has' if len(again) == 1 else 'have'} already been emailed from this"
+                           " app, so they're under Handled and won't be sent again.")
+            for p_ in problems[:8]:
+                st.caption("⚠️ " + p_)
+        if not st.session_state.get("queue"):
+            st.caption("Your leads appear below once added, with the email ready to check and send.")
+
+
 col_left, col_right = st.columns([1.08, 0.92], gap="large")
 
 # ---------------- Left: Target & Select ----------------
-with col_left:
-    with st.container(key="card-left"):
-        section_header("01", "Target market", "Pick a sector and territory to pull live firms from Companies House.")
+if st.session_state.get("view") == "quick":
+    with col_left:
+        render_quick_add()
+else:
+    with col_left:
+        with st.container(key="card-left"):
+            section_header("01", "Target market", "Pick a sector and territory to pull live firms from Companies House.")
 
-        selected_vertical_name = st.selectbox(
-            "Industry vertical",
-            options=sorted(VERTICAL_PRESETS.keys()),
-            index=sorted(VERTICAL_PRESETS.keys()).index("Estate & Lettings Agents"),
-            help="16 sectors, each with its own Companies House codes, systems, pitch and overview PDF.",
-        )
-        vertical_config = VERTICAL_PRESETS[selected_vertical_name]
-        render_html(
-            '<div class="pe-vertical"><div style="flex:1">'
-            '<div class="lbl">Systems we integrate with</div><div class="pe-chips">'
-            + "".join(chip(c, "accent") for c in vertical_config["crms"])
-            + '</div></div><div><div class="lbl">SIC</div><div class="pe-chips">'
-            + "".join(chip(c) for c in vertical_config["sic_codes"])
-            + "</div></div></div>"
-        )
-
-        f_col1, f_col2 = st.columns(2)
-        with f_col1:
-            location_input = st.text_input(
-                "Town, city or county",
-                placeholder="e.g. Walsall or West Midlands",
+            selected_vertical_name = st.selectbox(
+                "Industry vertical",
+                options=sorted(VERTICAL_PRESETS.keys()),
+                index=sorted(VERTICAL_PRESETS.keys()).index("Estate & Lettings Agents"),
+                help="16 sectors, each with its own Companies House codes, systems, pitch and overview PDF.",
             )
-        with f_col2:
-            keyword_filter = st.text_input(
-                "Name keyword (optional)",
-                placeholder=f"e.g. {vertical_config['search_hint']}",
+            vertical_config = VERTICAL_PRESETS[selected_vertical_name]
+            render_html(
+                '<div class="pe-vertical"><div style="flex:1">'
+                '<div class="lbl">Systems we integrate with</div><div class="pe-chips">'
+                + "".join(chip(c, "accent") for c in vertical_config["crms"])
+                + '</div></div><div><div class="lbl">SIC</div><div class="pe-chips">'
+                + "".join(chip(c) for c in vertical_config["sic_codes"])
+                + "</div></div></div>"
             )
 
-        r_col1, r_col2 = columns([1, 2.2])
-        with r_col1:
-            result_limit = st.selectbox("Results", [25, 50, 100], index=0)
-        with r_col2:
-            browse_btn = st.button(
-                "Find companies", type="primary", **FULL_WIDTH
-            )
-        target_row = None
-
-        if browse_btn:
-            if not ch_api_key:
-                st.error("Please supply your Companies House API key in the sidebar.")
-            else:
-                with st.spinner("Querying the Companies House register…"):
-                    enricher = LeadEnricher(ch_api_key=ch_api_key)
-                    leads_list, search_error = enricher.browse_vertical(
-                        sic_codes=vertical_config["sic_codes"],
-                        location_keyword=location_input,
-                        company_name_includes=keyword_filter,
-                        limit=result_limit,
-                    )
-                st.session_state["discovered_leads"] = leads_list
-                st.session_state["active_vertical_name"] = selected_vertical_name
-                st.session_state["search_location"] = location_input.strip()
-                st.session_state["selected_lead_row"] = None
-                # New search = new table widget, so no stale row selection carries over.
-                st.session_state["search_version"] = st.session_state.get("search_version", 0) + 1
-                if not search_error:
-                    st.session_state["stat_searches"] += 1
-                    st.session_state["stat_firms"] += len(leads_list)
-                if search_error:
-                    st.error(search_error)
-                elif not leads_list:
-                    st.warning(
-                        "No active companies matched. Try a broader location"
-                        " (e.g. county instead of town) or remove the name keyword."
-                    )
-
-    if st.session_state.get("discovered_leads"):
-        with st.container(key="card-select"):
-            leads_data = st.session_state["discovered_leads"]
-            where = st.session_state.get("search_location") or "the UK"
-            log_now = get_sent_log()
-            already = sum(1 for r in leads_data if r.get("Company Number") in log_now)
-            section_header(
-                "02", "Select firms",
-                f"{len(leads_data)} active {'firm' if len(leads_data) == 1 else 'firms'} in {where}"
-                f" · {st.session_state.get('active_vertical_name', '')}"
-                + (f" · {already} already contacted" if already else ""),
-            )
-
-            df = pd.DataFrame(leads_data)
-            df["Contacted"] = [sent_label(log_now.get(cn)) for cn in df["Company Number"]]
-            if "Town / Postcode" in df.columns:
-                df["Town"] = df["Town / Postcode"].astype(str).str.split(",").str[0]
-            if "Incorporated" in df.columns:
-                df["Incorporated"] = pd.to_datetime(df["Incorporated"], errors="coerce")
-
-            table_event = render_leads_table(
-                df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
-            )
-            selected_rows = [i for i in (table_event.selection.rows if table_event else []) if i < len(leads_data)]
-            selected = [leads_data[i] for i in selected_rows]
-            st.session_state["selected_rows_data"] = selected
-
-            batch_to_run: List[Dict[str, Any]] = []
-            website_override = ""
-            if not selected:
-                render_html(
-                    f'<div class="pe-hint">{icon("pointer", 16)}'
-                    "Tick one firm, or several to build a batch. Or enrich every result in one go.</div>"
+            f_col1, f_col2 = st.columns(2)
+            with f_col1:
+                location_input = st.text_input(
+                    "Town, city or county",
+                    placeholder="e.g. Walsall or West Midlands",
                 )
-                n_all = min(len(leads_data), MAX_BATCH)
-                fresh = [r for r in leads_data if r["Company Number"] not in log_now and r["Company Number"] not in st.session_state.get("queue", {})]
-                if st.button(
-                    f"⚡ Enrich all {min(len(fresh), MAX_BATCH)} new results"
-                    + (f" (skips {len(leads_data) - len(fresh)} already contacted or queued)" if len(fresh) < len(leads_data) else ""),
-                    type="primary", disabled=not fresh, **FULL_WIDTH,
-                    help=f"Finds contacts for every firm in the list (up to {MAX_BATCH} at a time), then sorts them into Ready to email / No email below.",
-                ):
-                    batch_to_run = fresh[:MAX_BATCH]
-                if len(fresh) > MAX_BATCH:
-                    st.caption(f"The first {MAX_BATCH} will be enriched. Run it again for the next {MAX_BATCH}.")
-            else:
-                n_sel = len(selected)
-                names = ", ".join(esc(friendly_company_name(r["Company Name"])) for r in selected[:3])
-                more = f" + {n_sel - 3} more" if n_sel > 3 else ""
-                contacted_sel = [r for r in selected if r["Company Number"] in log_now]
-                meta = (f'#{esc(selected[0]["Company Number"])} · {esc(selected[0]["Town / Postcode"])}'
-                        if n_sel == 1 else f"{names}{more}")
-                render_html(
-                    f'<div class="pe-selected"><div><div class="n">'
-                    f'{esc(selected[0]["Company Name"]) if n_sel == 1 else f"{n_sel} firms selected"}</div>'
-                    f'<div class="m">{meta}</div></div>'
-                    f'{chip(f"{n_sel} selected", "accent")}</div>'
+            with f_col2:
+                keyword_filter = st.text_input(
+                    "Name keyword (optional)",
+                    placeholder=f"e.g. {vertical_config['search_hint']}",
                 )
-                if contacted_sel:
-                    st.caption(
-                        f"⚠️ {len(contacted_sel)} of these already contacted: "
-                        + ", ".join(friendly_company_name(r["Company Name"]) for r in contacted_sel[:4])
-                        + ("…" if len(contacted_sel) > 4 else "")
-                    )
-                if n_sel > MAX_BATCH:
-                    st.warning(f"Batches are capped at {MAX_BATCH} firms. Only the first {MAX_BATCH} will be enriched.")
 
-                if n_sel == 1:
-                    e_col1, e_col2 = columns([1.6, 1])
-                    with e_col1:
-                        website_override = st.text_input(
-                            "Website (optional)", placeholder="Leave blank to auto-discover",
-                        )
-                    with e_col2:
-                        if st.button("Enrich & build dossier", type="primary", **FULL_WIDTH):
-                            batch_to_run = selected[:1]
+            r_col1, r_col2 = columns([1, 2.2])
+            with r_col1:
+                result_limit = st.selectbox("Results", [25, 50, 100], index=0)
+            with r_col2:
+                browse_btn = st.button(
+                    "Find companies", type="primary", **FULL_WIDTH
+                )
+            target_row = None
+
+            if browse_btn:
+                if not ch_api_key:
+                    st.error("Please supply your Companies House API key in the sidebar.")
                 else:
-                    if st.button(f"Enrich {min(n_sel, MAX_BATCH)} firms & add to review", type="primary", **FULL_WIDTH):
-                        batch_to_run = selected[:MAX_BATCH]
+                    with st.spinner("Querying the Companies House register…"):
+                        enricher = LeadEnricher(ch_api_key=ch_api_key)
+                        leads_list, search_error = enricher.browse_vertical(
+                            sic_codes=vertical_config["sic_codes"],
+                            location_keyword=location_input,
+                            company_name_includes=keyword_filter,
+                            limit=result_limit,
+                        )
+                    st.session_state["discovered_leads"] = leads_list
+                    st.session_state["active_vertical_name"] = selected_vertical_name
+                    st.session_state["search_location"] = location_input.strip()
+                    st.session_state["selected_lead_row"] = None
+                    # New search = new table widget, so no stale row selection carries over.
+                    st.session_state["search_version"] = st.session_state.get("search_version", 0) + 1
+                    if not search_error:
+                        st.session_state["stat_searches"] += 1
+                        st.session_state["stat_firms"] += len(leads_list)
+                    if search_error:
+                        st.error(search_error)
+                    elif not leads_list:
+                        st.warning(
+                            "No active companies matched. Try a broader location"
+                            " (e.g. county instead of town) or remove the name keyword."
+                        )
 
-            if batch_to_run:
-                vertical_now = st.session_state.get("active_vertical_name", "Estate & Lettings Agents")
-                run_enrichment(
-                    batch_to_run, vertical_now,
-                    manual_websites={batch_to_run[0]["Company Number"]: website_override} if website_override else None,
+        if st.session_state.get("discovered_leads"):
+            with st.container(key="card-select"):
+                leads_data = st.session_state["discovered_leads"]
+                where = st.session_state.get("search_location") or "the UK"
+                log_now = get_sent_log()
+                already = sum(1 for r in leads_data if r.get("Company Number") in log_now)
+                section_header(
+                    "02", "Select firms",
+                    f"{len(leads_data)} active {'firm' if len(leads_data) == 1 else 'firms'} in {where}"
+                    f" · {st.session_state.get('active_vertical_name', '')}"
+                    + (f" · {already} already contacted" if already else ""),
                 )
+
+                df = pd.DataFrame(leads_data)
+                df["Contacted"] = [sent_label(log_now.get(cn)) for cn in df["Company Number"]]
+                if "Town / Postcode" in df.columns:
+                    df["Town"] = df["Town / Postcode"].astype(str).str.split(",").str[0]
+                if "Incorporated" in df.columns:
+                    df["Incorporated"] = pd.to_datetime(df["Incorporated"], errors="coerce")
+
+                table_event = render_leads_table(
+                    df, key=f"leads_table_{st.session_state.get('search_version', 0)}"
+                )
+                selected_rows = [i for i in (table_event.selection.rows if table_event else []) if i < len(leads_data)]
+                selected = [leads_data[i] for i in selected_rows]
+                st.session_state["selected_rows_data"] = selected
+
+                batch_to_run: List[Dict[str, Any]] = []
+                website_override = ""
+                if not selected:
+                    render_html(
+                        f'<div class="pe-hint">{icon("pointer", 16)}'
+                        "Tick one firm, or several to build a batch. Or enrich every result in one go.</div>"
+                    )
+                    n_all = min(len(leads_data), MAX_BATCH)
+                    fresh = [r for r in leads_data if r["Company Number"] not in log_now and r["Company Number"] not in st.session_state.get("queue", {})]
+                    if st.button(
+                        f"⚡ Enrich all {min(len(fresh), MAX_BATCH)} new results"
+                        + (f" (skips {len(leads_data) - len(fresh)} already contacted or queued)" if len(fresh) < len(leads_data) else ""),
+                        type="primary", disabled=not fresh, **FULL_WIDTH,
+                        help=f"Finds contacts for every firm in the list (up to {MAX_BATCH} at a time), then sorts them into Ready to email / No email below.",
+                    ):
+                        batch_to_run = fresh[:MAX_BATCH]
+                    if len(fresh) > MAX_BATCH:
+                        st.caption(f"The first {MAX_BATCH} will be enriched. Run it again for the next {MAX_BATCH}.")
+                else:
+                    n_sel = len(selected)
+                    names = ", ".join(esc(friendly_company_name(r["Company Name"])) for r in selected[:3])
+                    more = f" + {n_sel - 3} more" if n_sel > 3 else ""
+                    contacted_sel = [r for r in selected if r["Company Number"] in log_now]
+                    meta = (f'#{esc(selected[0]["Company Number"])} · {esc(selected[0]["Town / Postcode"])}'
+                            if n_sel == 1 else f"{names}{more}")
+                    render_html(
+                        f'<div class="pe-selected"><div><div class="n">'
+                        f'{esc(selected[0]["Company Name"]) if n_sel == 1 else f"{n_sel} firms selected"}</div>'
+                        f'<div class="m">{meta}</div></div>'
+                        f'{chip(f"{n_sel} selected", "accent")}</div>'
+                    )
+                    if contacted_sel:
+                        st.caption(
+                            f"⚠️ {len(contacted_sel)} of these already contacted: "
+                            + ", ".join(friendly_company_name(r["Company Name"]) for r in contacted_sel[:4])
+                            + ("…" if len(contacted_sel) > 4 else "")
+                        )
+                    if n_sel > MAX_BATCH:
+                        st.warning(f"Batches are capped at {MAX_BATCH} firms. Only the first {MAX_BATCH} will be enriched.")
+
+                    if n_sel == 1:
+                        e_col1, e_col2 = columns([1.6, 1])
+                        with e_col1:
+                            website_override = st.text_input(
+                                "Website (optional)", placeholder="Leave blank to auto-discover",
+                            )
+                        with e_col2:
+                            if st.button("Enrich & build dossier", type="primary", **FULL_WIDTH):
+                                batch_to_run = selected[:1]
+                    else:
+                        if st.button(f"Enrich {min(n_sel, MAX_BATCH)} firms & add to review", type="primary", **FULL_WIDTH):
+                            batch_to_run = selected[:MAX_BATCH]
+
+                if batch_to_run:
+                    vertical_now = st.session_state.get("active_vertical_name", "Estate & Lettings Agents")
+                    run_enrichment(
+                        batch_to_run, vertical_now,
+                        manual_websites={batch_to_run[0]["Company Number"]: website_override} if website_override else None,
+                    )
 
 
 # ---------------- Right: Dossier ----------------
@@ -5994,12 +6237,17 @@ with col_right:
             primary_email = pick_primary_email(lead, contact_name)
             is_sent = cn in log_now
 
-            section_header("03", "Lead dossier", "Review, tailor the pitch and send.")
+            section_header("02" if st.session_state.get("view") == "quick" else "03", "Lead dossier",
+                           "Review, tailor the pitch and send.")
 
             # Firm header
-            meta = [chip(f"#{lead.company_number or 'N/A'}"), chip(current_vert_name, "accent")]
+            quick_lead = bool(item.get("lead_source"))  # Added by hand: no company number or website to show
+            meta = ([] if quick_lead else [chip(f"#{lead.company_number or 'N/A'}")]) + [chip(current_vert_name, "accent")]
             meta += [chip(f"SIC {c}", "muted") for c in lead.sic_codes[:2]]
-            meta.append(confidence_chip(lead.website_confidence if lead.website_url else None))
+            if quick_lead:
+                meta.append(chip(f"Added by {item.get('added_by') or 'Quick add'}", "muted"))
+            else:
+                meta.append(confidence_chip(lead.website_confidence if lead.website_url else None))
             if is_sent:
                 meta.append(chip(f"Sent {sent_label(log_now[cn])[2:]}", "good"))
             zrec = get_zoho_store().get(cn) or {}
@@ -6444,7 +6692,7 @@ if queue:
         stamp = now_uk().strftime("%Y-%m-%d_%H%M")
 
         section_header(
-            "04", "Review & send",
+            "03" if st.session_state.get("view") == "quick" else "04", "Review & send",
             f"{len(queue_order)} enriched · {len(ready_all)} ready to email · {len(noemail_all)} no email found"
             f" · {len(handled_all)} handled",
         )
@@ -6659,7 +6907,7 @@ elif st.session_state.get("discovered_leads"):
     active_step = 2
 else:
     active_step = 1
-render_html(hero_html(active_step), target=hero_slot)
+render_html(quick_hero_html() if st.session_state.get("view") == "quick" else hero_html(active_step), target=hero_slot)
 render_html(
     '<div class="pe-stats">'
     f'<div class="pe-stat"><div class="v">{st.session_state["stat_firms"]}</div><div class="l">Firms</div></div>'
