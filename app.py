@@ -5139,6 +5139,7 @@ def columns(spec, **kwargs):
 
 QUICK_MODE = st.session_state.get("role") == "quick"
 QUICK_SOURCE = _secret_value("QUICK_ADD_LEAD_SOURCE", "Telemarketing")
+QUICK_FROM = _secret_value("QUICK_ADD_FROM", "vh@sycomms.co.uk").strip().lower()  # Quick add logins always send as this
 
 
 def register_vertical(base: str, crm: str) -> str:
@@ -6642,9 +6643,21 @@ def render_zoho_send_panel(ready_sel: List[str], log_now: Dict[str, Any]) -> Non
         if not senders:
             st.warning("Zoho didn't return any address to send from.")
             return
-        st.selectbox("Send from", list(range(len(senders))), key="zs_from",
-                     format_func=lambda i: f"{senders[i].get('user_name') or ''} <{senders[i]['email']}>".strip()
-                     + (" · org address" if senders[i].get("type") == "org_email" else ""))
+        fixed = None
+        if QUICK_MODE:  # Telemarketer login: one fixed From address, no choice
+            fixed = next((dict(a, user_name=a.get("user_name") or get_sender().get("name") or "")
+                          for a in senders if (a.get("email") or "").strip().lower() == QUICK_FROM), None)
+            if not fixed:
+                st.error(f"Zoho won't send from {QUICK_FROM} yet, so nothing can be sent. Sam needs to add it in Zoho CRM:"
+                         " Setup → Channels → Email → Organization Emails → Add, then click the link in the"
+                         " verification email that arrives in that inbox.")
+                return
+            st.caption(f"✉️ Sending from **{esc(fixed['email'])}**"
+                       + (f" as {esc(fixed['user_name'])}" if fixed.get("user_name") else ""))
+        else:
+            st.selectbox("Send from", list(range(len(senders))), key="zs_from",
+                         format_func=lambda i: f"{senders[i].get('user_name') or ''} <{senders[i]['email']}>".strip()
+                         + (" · org address" if senders[i].get("type") == "org_email" else ""))
         ids = [c for c in ready_sel if (store.get(c) or {}).get("status") != "customer"]
         customers = len(ready_sel) - len(ids)
         if customers:
@@ -6661,7 +6674,7 @@ def render_zoho_send_panel(ready_sel: List[str], log_now: Dict[str, Any]) -> Non
             pop = st.popover(label, disabled=not ids, **FULL_WIDTH)
         with pop:
             idx = st.session_state.get("zs_from", 0)
-            frm = senders[idx] if 0 <= idx < len(senders) else senders[0]
+            frm = fixed or (senders[idx] if 0 <= idx < len(senders) else senders[0])
             st.markdown(f"Send **{len(ids)} emails** now from **{esc(frm['email'])}**?")
             st.caption("This can't be undone. Each is logged on its Zoho lead.")
             if st.button("Yes, send them now", type="primary", key="zs_confirm", **FULL_WIDTH):
